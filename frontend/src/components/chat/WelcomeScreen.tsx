@@ -1,4 +1,4 @@
-﻿import { Bot, TrendingUp, Globe, Sparkles, Users, UserCircle2, NotebookPen } from "lucide-react";
+import { Bot, TrendingUp, Globe, Sparkles, Users, UserCircle2, NotebookPen } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 
 interface Example {
@@ -282,7 +282,7 @@ export function WelcomeScreen({ onExample }: Props) {
           <Bot className="absolute -bottom-1 -right-1 h-4 w-4 rounded-full bg-card p-0.5 text-primary" />
         </div>
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">easymoneysniper</h2>
+          <h2 className="text-2xl font-bold tracking-tight">StockSignalForge</h2>
           <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-500">research the gap · respect the evidence</p>
           <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto leading-relaxed">
             {t.appTagline}

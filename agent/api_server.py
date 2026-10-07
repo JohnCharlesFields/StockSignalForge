@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""easymoneysniper API Server - RESTful API for finance research and backtesting.
+"""StockSignalForge API Server - RESTful API for finance research and backtesting.
 
 V5: ReAct Agent + async /run + CORS env + SSE tool events.
 """
@@ -621,8 +621,8 @@ class MessageResponse(BaseModel):
 # ============================================================================
 
 app = FastAPI(
-    title="easymoneysniper API",
-    description="easymoneysniper API: evidence-first finance research, backtesting, and swarm workflows",
+    title="StockSignalForge API",
+    description="StockSignalForge API: evidence-first finance research, backtesting, and swarm workflows",
     version="5.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -1152,7 +1152,7 @@ MARKET_DATA_KEY_PLACEHOLDERS = {"", "your-twelve-data-api-key", "your-fmp-api-ke
 def _ensure_agent_env_file() -> Path:
     """Ensure the project-local agent/.env exists."""
     if not ENV_PATH.exists():
-        ENV_PATH.write_text("# Created by easymoneysniper Web UI settings.\n", encoding="utf-8")
+        ENV_PATH.write_text("# Created by StockSignalForge Web UI settings.\n", encoding="utf-8")
     return ENV_PATH
 
 
@@ -2006,14 +2006,14 @@ def _text_to_report_html(run_id: str, sources: list[Path], run_dir: Path) -> str
 <html>
 <head>
   <meta charset="utf-8">
-  <title>easymoneysniper Run Report {html.escape(run_id)}</title>
+  <title>StockSignalForge Run Report {html.escape(run_id)}</title>
   <style>
     @page {{
       size: A4;
       margin: 15mm 14mm 18mm;
       @bottom-right {{
         color: #64748b;
-        content: "easymoneysniper · " counter(page);
+        content: "StockSignalForge · " counter(page);
         font-size: 9px;
       }}
     }}
@@ -2132,7 +2132,7 @@ def _text_to_report_html(run_id: str, sources: list[Path], run_dir: Path) -> str
 </head>
 <body>
   <header class="cover">
-    <div class="brand">easymoneysniper Research · #35</div>
+    <div class="brand">StockSignalForge Research · #35</div>
     <h1>策略运行报告</h1>
     <p class="subtitle">自动汇总本次策略运行产物、核心文本结果与可审计记录。</p>
     <div class="meta-grid">
@@ -3443,7 +3443,7 @@ async def event_radar_tool_page():
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>事件驱动选股雷达 - easymoneysniper</title>
+  <title>事件驱动选股雷达 - StockSignalForge</title>
   <style>
     :root { color-scheme: dark; --bg:#0b1117; --panel:#121b24; --panel2:#172331; --line:#253443; --text:#e8eef5; --muted:#9fb0c1; --accent:#64a3ff; --good:#30d158; --bad:#ff5c7a; --warn:#ffd166; }
     * { box-sizing: border-box; }
@@ -10044,13 +10044,13 @@ async def signal_dashboard_tool():
     return HTMLResponse(
         """
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>easymoneysniper · 三维信号总览</title><style>
+<title>StockSignalForge · 三维信号总览</title><style>
 :root{color-scheme:dark;--bg:#09131b;--panel:#101e29;--line:#263947;--muted:#91a5b2;--text:#eef5f7;--good:#6dd7b2;--wait:#e9b85d;--bad:#f07b78;--gold:#d5ad5c}
 *{box-sizing:border-box}body{margin:0;padding:24px;background:var(--bg);color:var(--text);font:13px/1.45 Inter,"Microsoft YaHei",sans-serif}h1{margin:0;font-size:22px}p{margin:5px 0 12px;color:var(--muted)}.brand{display:flex;align-items:center;gap:9px;color:var(--gold);font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;margin-bottom:7px}.ball{display:inline-grid;place-items:center;width:24px;height:24px;border:2px solid var(--gold);border-radius:50%;font-size:9px;letter-spacing:0}.flow{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}.flow span{padding:5px 8px;border:1px solid var(--line);border-radius:5px;background:#102532;color:#bcd7db;font-size:12px}.toolbar{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px}select,button{min-height:40px;padding:9px 13px;border:1px solid var(--line);border-radius:6px;background:#152632;color:var(--text);white-space:nowrap}select{min-width:300px}button{cursor:pointer;background:#16635e;font-weight:700}button.secondary{background:#152632}button.agent{background:#8a5b18;border-color:#b47d2d}button:disabled{opacity:.55;cursor:not-allowed}.progress{display:none;margin:0 0 14px;padding:12px 14px;border:1px solid var(--line);border-radius:7px;background:#102532}.progress.show{display:block}.progress-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}.bar{height:7px;border-radius:9px;background:#203641;overflow:hidden}.bar i{display:block;height:100%;background:#55c5b5;transition:width .25s}.summary{margin-top:8px;color:var(--muted);font-size:12px}.panel{border:1px solid var(--line);border-radius:7px;background:var(--panel);overflow-y:auto;overflow-x:hidden;max-height:calc(100vh - 240px)}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{padding:9px 8px;border-bottom:1px solid #20333f;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{color:#b9cbd3;background:#12232e;font-size:11px;position:sticky;top:0;z-index:1}
 tr.highlight{background:#1a3a2a !important;border-left:3px solid var(--good)}
 tr.highlight td{color:#fff}
 .lamp{display:flex;align-items:center;gap:5px}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}.good{background:var(--good)}.wait{background:var(--wait)}.bad{background:var(--bad)}.muted{color:var(--muted)}.stack{display:grid;gap:4px}.stack b,.stack small{display:block}.stack small{color:var(--muted);line-height:1.3}.relay{color:#f1d48e}.relay b{color:#f1d48e}.score{color:#82e4c4;font-size:15px}a{color:#8fc0ff;text-decoration:none}.empty{padding:28px;text-align:center;color:var(--muted)}.notice{margin:12px 2px 0;color:var(--muted);font-size:12px}@media(max-width:1000px){body{padding:14px;font-size:12px}th,td{padding:7px 5px}.panel{max-height:calc(100vh - 225px)}}
-</style></head><body><div class="brand"><span class="ball">35</span> easymoneysniper · research board</div><h1>三维量化信号总览</h1><p>胜率口径排序：历史验证胜率优先 → 统一研究概率 → 风险收益比 → 可执行性。所有候选都在一张总表中完成复核。</p>
+</style></head><body><div class="brand"><span class="ball">35</span> StockSignalForge · research board</div><h1>三维量化信号总览</h1><p>胜率口径排序：历史验证胜率优先 → 统一研究概率 → 风险收益比 → 可执行性。所有候选都在一张总表中完成复核。</p>
 <div class="flow"><span>第一层 · 机会质量</span><span>第二层 · 启动择时 + 日隧道协商</span><span>第三层 · 事件风险</span><span>汇总 · 统一证据与失效退出</span></div>
 <div class="toolbar"><select id="universe"></select><button class="agent" id="run">运行三层分析</button><button class="secondary" id="load">刷新总览</button></div>
 <div class="progress" id="progress"><div class="progress-head"><b id="phase">准备运行</b><span id="pct">0%</span></div><div class="bar"><i id="bar" style="width:0%"></i></div><div class="summary" id="summary">依次更新机会筛选、运行启动择时，并汇总个股决策卡片。</div></div>
@@ -10500,7 +10500,7 @@ async def health_check():
     """Liveness probe."""
     return HealthResponse(
         status="healthy",
-        service="easymoneysniper API",
+        service="StockSignalForge API",
         timestamp=datetime.now().isoformat()
     )
 
@@ -10612,7 +10612,7 @@ async def shutdown_local_api(background_tasks: BackgroundTasks, request: Request
     background_tasks.add_task(_terminate_current_process)
     return {
         "status": "shutting-down",
-        "service": "easymoneysniper API",
+        "service": "StockSignalForge API",
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -10636,7 +10636,7 @@ async def list_skills():
 async def api_info():
     """Service metadata."""
     return {
-        "service": "easymoneysniper API",
+        "service": "StockSignalForge API",
         "version": "5.0.0",
         "docs": "/docs",
         "health": "/health",
@@ -11253,7 +11253,7 @@ def serve_main(argv: list[str] | None = None) -> int:
                     raise
                 return await super().get_response("index.html", scope)
 
-    parser = argparse.ArgumentParser(description="easymoneysniper Server")
+    parser = argparse.ArgumentParser(description="StockSignalForge Server")
     parser.add_argument("--port", type=int, default=8000, help="Listen port (default 8000)")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
     parser.add_argument("--dev", action="store_true", help="Dev mode: spawn Vite on :5173")
@@ -11286,7 +11286,7 @@ def serve_main(argv: list[str] | None = None) -> int:
         print("[warn] Run: cd frontend && npm run build")
 
     print("=" * 50)
-    print("  easymoneysniper Server")
+    print("  StockSignalForge Server")
     print(f"  http://127.0.0.1:{args.port}")
     print("=" * 50)
 

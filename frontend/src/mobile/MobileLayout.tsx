@@ -36,7 +36,7 @@ function titleFor(pathname: string): string {
   const hit = Object.keys(TITLES)
     .filter((p) => p !== "/m" && pathname.startsWith(p))
     .sort((a, b) => b.length - a.length)[0];
-  return hit ? TITLES[hit] : "easymoneysniper";
+  return hit ? TITLES[hit] : "StockSignalForge";
 }
 
 export function MobileLayout() {

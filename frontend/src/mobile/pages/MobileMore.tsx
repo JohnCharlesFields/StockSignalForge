@@ -109,7 +109,7 @@ export function MobileMore() {
         </button>
       </section>
 
-      <p className="px-1 text-center text-[11px] text-muted-foreground/60">easymoneysniper · 手机版</p>
+      <p className="px-1 text-center text-[11px] text-muted-foreground/60">StockSignalForge · 手机版</p>
     </div>
   );
 }

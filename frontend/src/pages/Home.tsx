@@ -822,7 +822,7 @@ export function Home() {
               <div>
                 <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-primary">
                   <Activity className="h-4 w-4" />
-                  easymoneysniper research cockpit
+                  StockSignalForge research cockpit
                 </div>
                 <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">尾盘买入 · 次日开盘卖出 · 隔夜研究驾驶舱</h1>
                 <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
