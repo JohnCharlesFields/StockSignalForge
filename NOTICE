@@ -21,7 +21,7 @@ Prose, tables, and figures from the source papers and reports are NOT
 reproduced in this repository. Only the mathematical formulas — which are
 factual content and not subject to copyright — are reimplemented here.
 
-EasyMoneySniper integrates GilData MCP (Hundsun Juyuan) as an external,
+StockSignalForge integrates GilData MCP (Hundsun Juyuan) as an external,
 user-configured financial research data service.
 Service information: https://www.gildata.com/products/datamap
 No GilData credentials, service implementation, or licensed market datasets

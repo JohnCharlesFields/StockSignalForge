@@ -150,7 +150,7 @@ export function Layout() {
             </span>
             {!collapsed && (
               <span>
-                <span className="block">easymoneysniper</span>
+                <span className="block">StockSignalForge</span>
                 <span className="block text-[9px] font-medium uppercase tracking-widest text-muted-foreground">research board</span>
               </span>
             )}

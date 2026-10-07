@@ -1,4 +1,6 @@
-# EasyMoneySniper
+# StockSignalForge · 股讯工坊
+
+**AI 股票分析、信号扫描与策略回测。**
 
 基于 GilData MCP（恒生聚源金融数据服务）接入能力扩展的金融研究工作台，支持自然语言研究、策略回测、个股分析与持仓复盘。
 
