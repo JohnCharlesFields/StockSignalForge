@@ -1,309 +1,203 @@
-# StockSignalForge 页面图册
+# StockSignalForge 完整页面图册
 
 **基于 GilData MCP 打造的 AI 股票研究工作台。**
 
-图册覆盖当前全部桌面与移动端应用路由，并额外展示看板的持续监测、兑现对账与今日篮子标签页。截图拍摄于 2026-10-07，来自实际应用界面。行情与研究页为静态缓存快照，日期以画面内标注为准；账户、回测和相关性示例为合成数据。密钥、私有地址、个人自选、关注记录和研究会话未公开。空状态表示截图环境未配置或未提供数据，不表示真实运行结果。
+桌面端采用使用者提供的 12 张深色主题原图，原始 PNG 未裁切、重采样或改写，点击图片下方链接可查看原图。截图保留实际部署中的 easymoneysniper 名称；开源仓库名称为 StockSignalForge。画面里的报价、日期、研究指标与任务状态属于各自的历史快照，不代表当前行情。使用者选择公开的自选备注与博主观点在这些截图中保留；源码中的私有 MCP 地址、API key 与运行数据库仍不随仓库发布。移动端沿用已有 6 张截图，其中持仓为合成演示数据。
 
-GilData MCP 是金融研究数据接入能力的组成部分：当前代码通过 FinQuery 获取明确触发的研究样本，校验标的、日期、币种等字段后供缓存读取和个股研究使用。截图中的所有指标并非都来自 GilData；行情、回测、宏观与模拟模块也包含其他来源。
+GilData MCP 是本项目的金融研究数据接入特色：当前代码显式调用 FinQuery 获取研究补充数据，检查标的、日期、币种与口径后用于缓存和个股研究上下文。图中行情、信号、AI 解释及其他指标还涉及其他数据源与模块，具体边界见 [GilData MCP 接入说明](GILDATA_MCP.md)。
 
-## 页面索引
+本图册收录 12 张桌面原图与 6 张移动端截图，并保留完整的页面与标签入口索引。未提供对应桌面原图的页面仍列出功能说明，便于了解应用范围。
 
-| 页面 | 路由／入口 | 主要用途 |
-| --- | --- | --- |
-| [回调买入榜](#01-priority-board) | `/` | 开始每日研究，先建立候选清单。 |
-| [持续监测](#02-priority-monitor) | `/ → 持续监测` | 关注候选随时间的变化，而不只看单日排名。 |
-| [兑现对账](#03-priority-scorecard) | `/ → 兑现对账` | 检查研究信号与后续结果是否一致。 |
-| [今日篮子](#26-priority-basket) | `/ → 今日篮子` | 从候选列表过渡到组合研究。 |
-| [盘前新闻 · 卡片](#04-news-swipe) | `/premarket-news` | 快速进行盘前阅读。 |
-| [盘前新闻 · 清单](#05-news-list) | `/premarket-news/list` | 集中检索和比较新闻事件。 |
-| [个股研判](#06-single-stock) | `/single-stock-overnight?symbol=SPY` | 深入分析某个候选，连接数据、图表与研究解释。 |
-| [自选池](#07-watchlist) | `/watchlist` | 维护自己的研究范围。公开截图移除了个人自选。 |
-| [博主观点雷达](#08-creator-radar) | `/creator-opinions` | 比较媒体观点与其他研究线索。公开截图移除了个人关注记录。 |
-| [持仓决策](#09-portfolio) | `/portfolio` | 复盘组合和仓位管理。截图内资金与持仓全部为合成数据。 |
-| [SOXL 实时模拟](#10-soxl-paper) | `/soxl-quant` | 研究 SOXL 的行情驱动模拟；不会发送实盘券商订单。截图未连接实时行情。 |
-| [任务中心](#11-task-center) | `/batch-tasks` | 检查每日研究任务与数据准备状态。私有访问地址不公开。 |
-| [启动信号](#12-launch-signal) | `/launch-signal` | 探索原始信号，辅助后续验证。 |
-| [实股信号](#13-stock-signals) | `/stock-signals` | 集中观察股票信号；结果依赖对应数据源与研究口径。 |
-| [事件雷达](#14-event-radar) | `/event-radar` | 把新闻和事件线索与价格研究结合。 |
-| [宏观恐慌雷达](#15-macro-panic) | `/macro-panic-radar` | 为个股研究补充宏观风险环境；代理指标与官方 VIX 会分开标注。 |
-| [三维信号汇总](#16-signal-dashboard) | `/signal-dashboard` | 跨模块比较同一批候选。 |
-| [隔夜驾驶舱](#17-overnight-cockpit) | `/overnight-cockpit` | 研究隔夜策略与所属指数的相对表现。 |
-| [Alpha 因子库](#18-alpha-library) | `/alpha-zoo` | 寻找因子研究起点。 |
-| [Alpha 因子详情](#19-alpha-detail) | `/alpha-zoo/academic_carhart_mom` | 审查因子定义和实现，再决定是否评估。 |
-| [Alpha Bench](#20-alpha-benchmark) | `/alpha-zoo/bench` | 在自己的数据和范围上验证因子；截图没有触发真实评估。 |
-| [研究助手](#21-research-agent) | `/agent` | 从问题出发组织研究流程。当前默认导航隐藏该入口，但路由仍可直接访问。 |
-| [回测运行详情](#22-backtest-detail) | `/runs/:runId` | 复核一次策略运行的过程和结果。截图使用合成演示运行，非真实业绩。 |
-| [策略对比](#23-strategy-compare) | `/compare` | 比较策略、参数或研究方案。截图的两次运行均为合成演示。 |
-| [相关性矩阵](#24-correlation) | `/correlation` | 观察资产关系与分散程度。截图矩阵使用合成数据。 |
-| [设置](#25-settings) | `/settings` | 连接自己的服务。截图不含密钥、地址或密钥提示片段。 |
-| [移动端 · 榜单](#27-mobile-board) | `/m` | 在移动设备上快速浏览榜单。 |
-| [移动端 · 新闻](#28-mobile-news) | `/m/news` | 碎片时间浏览新闻。 |
-| [移动端 · 个股](#29-mobile-stock) | `/m/stock?symbol=SPY` | 移动端复核某只股票。 |
-| [移动端 · 持仓](#30-mobile-portfolio) | `/m/portfolio` | 移动端复盘持仓。资金与持仓仍为合成演示。 |
-| [移动端 · 自选](#31-mobile-watchlist) | `/m/watchlist` | 快速管理关注标的。个人自选未公开。 |
-| [移动端 · 更多](#32-mobile-more) | `/m/more` | 查找完整功能；部分进阶工具沿用桌面布局。 |
+## 桌面截图索引
 
-## 截图与功能说明
+| 截图 | 展示内容 |
+| --- | --- |
+| [回调买入榜：每日研究入口](#01-priority-overview) | 从回调候选开始建立研究清单。 |
+| [回调买入榜：校准口径与候选对比](#02-priority-methodology) | 展开胜率说明后，页面将研究假设与排序结果放在一起：先说明校准目标、成本扣除和基线，再展示 DELL、WBD、QCOM、MPC 等候选的指标与标签，方便横向比较同一批次中的研究对象。 |
+| [个股研判：K 线、均线与价位结构](#03-stock-chart) | 输入股票代码后，在同一页面查看报价、缓存截止日期与行情图表。 |
+| [个股研判：新闻情绪、公司业务与产业链](#04-stock-context) | 将价格研究与公司背景放在一起。 |
+| [个股研判：信号判定、隔夜 Alpha 与行动区间](#05-stock-signal) | 把研究信号拆成可检查的条件：校准胜率、回调状态、波动变化和相对大盘强度集中显示。 |
+| [个股研判：AI 复核、支持因素与风险](#06-stock-ai-review) | AI 复核将模型结论展开为支持因素与反对因素，保留原始指标字段供追溯。 |
+| [个股研判：斐波那契参考与相关性证据](#07-stock-evidence) | 展示研究结论背后的辅助证据。 |
+| [盘前新闻：宏观事件卡片与阅读反馈](#08-news-cards) | 通过卡片逐条阅读盘前资讯。 |
+| [盘前新闻：筛选清单与跨事件比较](#09-news-list) | 以清单集中比较宏观与个股新闻，支持时间范围、未读状态和分数筛选，并提供手动更新入口。 |
+| [自选池：研究范围、备注与批量分析](#10-watchlist) | 维护个人研究股票池，支持单只添加、填写关注原因和批量导入，并提供自选池三层分析入口。 |
+| [博主观点雷达：视频摘要与赛道传导](#11-creator-radar) | 把长视频观点整理为可浏览的研究线索。 |
+| [任务中心：每日扫描进度与运行结果](#12-task-center) | 查看每日三层扫描是否完成、当前处理进度、计划时间、启用状态和最近运行结果。 |
 
-<a id="01-priority-board"></a>
+## 桌面功能展示
 
-### 回调买入榜
+<a id="01-priority-overview"></a>
 
-入口：`/`。按回调信号、历史校准口径、相对大盘强度和流动性筛选研究候选；可切换高流动性、深超卖与单腿期权快照。
+### 回调买入榜：每日研究入口
 
-开始每日研究，先建立候选清单。
+入口：`/`
 
-![回调买入榜界面](assets/screenshots/01-priority-board.jpg)
+从回调候选开始建立研究清单。顶部集中展示优先标的和相关候选，主体显示榜单口径、数据状态、高流动性过滤、生命周期监测及候选统计，让读者先了解数据是否准备完成，再比较研究对象。
 
-<a id="02-priority-monitor"></a>
+画面中的优先级、校准胜率、相对大盘强度、波动趋势和择时折扣分别承担不同角色。校准胜率指历史口径下扣除成本后跑赢标的自身基线的概率；“已验证”标记与历史校准有关。截图明确提示候选批次已过期，并保留实盘验证期提醒，阅读时应先核对交易日与数据来源。
 
-### 持续监测
+![回调买入榜：每日研究入口](assets/screenshots/desktop/01-priority-overview.png)
 
-入口：`/ → 持续监测`。跟踪候选首次出现、连续观察、排名变化及失效状态，复核信号的生命周期。
+[查看完整原图](assets/screenshots/desktop/01-priority-overview.png)
 
-关注候选随时间的变化，而不只看单日排名。
+<a id="02-priority-methodology"></a>
 
-![持续监测界面](assets/screenshots/02-priority-monitor.jpg)
+### 回调买入榜：校准口径与候选对比
 
-<a id="03-priority-scorecard"></a>
+入口：`/`
 
-### 兑现对账
+展开胜率说明后，页面将研究假设与排序结果放在一起：先说明校准目标、成本扣除和基线，再展示 DELL、WBD、QCOM、MPC 等候选的指标与标签，方便横向比较同一批次中的研究对象。
 
-入口：`/ → 兑现对账`。查看已记录预测的结算、命中口径、净超额、可靠性分桶和排名分桶；区分前向记录与历史回放。
+主胜率来自 pullback_hv 历史校准；市场流动性、相对强度与行业 ETF 标签用于排序微调和前向对账。表格同时显示行业、流动性、优先级、相对大盘表现与波动状态；来源审计状态和 replay 标记保留在原图中，便于理解证据的适用范围。
 
-检查研究信号与后续结果是否一致。
+![回调买入榜：校准口径与候选对比](assets/screenshots/desktop/02-priority-methodology.png)
 
-![兑现对账界面](assets/screenshots/03-priority-scorecard.jpg)
+[查看完整原图](assets/screenshots/desktop/02-priority-methodology.png)
 
-<a id="26-priority-basket"></a>
+<a id="03-stock-chart"></a>
 
-### 今日篮子
+### 个股研判：K 线、均线与价位结构
 
-入口：`/ → 今日篮子`。以预算、候选数量和权重方式生成候选研究篮子，辅助比较组合分配。
+入口：`/single-stock-overnight?symbol=SPY`
 
-从候选列表过渡到组合研究。
+输入股票代码后，在同一页面查看报价、缓存截止日期与行情图表。截图以 DELL 为例，展示三个月日线、EMA 均线、历史买入标记、成交量相关开关，以及买入、停止买入、止损和当前价等价位线。
 
-![今日篮子界面](assets/screenshots/26-priority-basket.jpg)
+图表支持时间范围和周期切换，提供 VOL、MACD、RSI、KDJ、HV 等指标入口。绿色与红色背景带解释买卖主导区域，POC 线用于观察成交密集价位；这些图层可作为结构复核线索。画面标注“日线·非实时”和缓存收盘日期，BLOCK OPEN 状态也一并保留。
 
-<a id="04-news-swipe"></a>
+![个股研判：K 线、均线与价位结构](assets/screenshots/desktop/03-stock-chart.png)
 
-### 盘前新闻 · 卡片
+[查看完整原图](assets/screenshots/desktop/03-stock-chart.png)
 
-入口：`/premarket-news`。用卡片浏览新闻，查看涉及标的、事件解释与重要性；通过勾叉反馈调整后续新闻偏好。
+<a id="04-stock-context"></a>
 
-快速进行盘前阅读。
+### 个股研判：新闻情绪、公司业务与产业链
 
-![盘前新闻 · 卡片界面](assets/screenshots/04-news-swipe.jpg)
+入口：`/single-stock-overnight?symbol=SPY`
 
-<a id="05-news-list"></a>
+将价格研究与公司背景放在一起。上方汇总近期新闻的正面、中性、负面标签、短期影响估计和原始来源；下方展示 Dell 的行业分类、市值、财报时间、主营业务与主要产品，帮助读者先理解公司靠什么经营。
 
-### 盘前新闻 · 清单
+公司卡片进一步列出上游供应商、下游客户、竞争对手、核心竞争力和赛道地位，适合梳理产业链与研究问题。新闻情绪是启发式标注，画面中的影响值也有估计口径；公司资料与新闻各自显示来源和日期，应与最新披露交叉核对。
 
-入口：`/premarket-news/list`。以列表方式查看盘前资讯，按页面提供的条件筛选与复核新闻上下文。
+![个股研判：新闻情绪、公司业务与产业链](assets/screenshots/desktop/04-stock-context.png)
 
-集中检索和比较新闻事件。
+[查看完整原图](assets/screenshots/desktop/04-stock-context.png)
 
-![盘前新闻 · 清单界面](assets/screenshots/05-news-list.jpg)
+<a id="05-stock-signal"></a>
 
-<a id="06-single-stock"></a>
+### 个股研判：信号判定、隔夜 Alpha 与行动区间
 
-### 个股研判
+入口：`/single-stock-overnight?symbol=SPY`
 
-入口：`/single-stock-overnight?symbol=SPY`。汇总公司与赛道背景、价格图表、技术指标、关键行动区间、风险信息和研究复核；可加入自选池。GilData 的规范化研究样本可作为补充上下文。
+把研究信号拆成可检查的条件：校准胜率、回调状态、波动变化和相对大盘强度集中显示。截图保留“处于回调区，但波动尚未扩张”的解释，读者可以看到当前条件与进一步确认条件之间的关系。
 
-深入分析某个候选，连接数据、图表与研究解释。
+左侧独立展示隔夜 Alpha 胜率、强隔夜胜率、平均超额、样本量和 Beta，并用归一化曲线比较标的与 SPY。右侧列出强势确认、回踩复核、停止追高、停止买入及止损止盈价位，用于盘中人工复核。隔夜口径与回调口径分开标注，画面也说明行动区间不构成自动下单指令。
 
-![个股研判界面](assets/screenshots/06-single-stock.jpg)
+![个股研判：信号判定、隔夜 Alpha 与行动区间](assets/screenshots/desktop/05-stock-signal.png)
 
-<a id="07-watchlist"></a>
+[查看完整原图](assets/screenshots/desktop/05-stock-signal.png)
 
-### 自选池
+<a id="06-stock-ai-review"></a>
 
-入口：`/watchlist`。单只或批量添加标的、管理启用状态、备注和删除；汇总自选标的的研究指标并触发自选范围复核。
+### 个股研判：AI 复核、支持因素与风险
 
-维护自己的研究范围。公开截图移除了个人自选。
+入口：`/single-stock-overnight?symbol=SPY`
 
-![自选池界面](assets/screenshots/07-watchlist.jpg)
+AI 复核将模型结论展开为支持因素与反对因素，保留原始指标字段供追溯。截图同时列出趋势与相对强度、波动和 Gamma 环境、宏观代理及估值信息，并说明当前价格、校准胜率与买入区间之间存在的约束。
 
-<a id="08-creator-radar"></a>
+关注价位卡片汇总强势触发、回踩触发、停止买入、止损与止盈位置；下方指标对照解释校准胜率和 Beta 的参考范围。模型名、风险因素和限制条件都保留在画面中，方便把生成解释与结构化数据逐项核对；应结合条件和数据日期阅读整个结论。
 
-### 博主观点雷达
+![个股研判：AI 复核、支持因素与风险](assets/screenshots/desktop/06-stock-ai-review.png)
 
-入口：`/creator-opinions`。汇总配置频道的视频记录、观点、股票标签与赛道信号，将非结构化观点纳入研究观察。
+[查看完整原图](assets/screenshots/desktop/06-stock-ai-review.png)
 
-比较媒体观点与其他研究线索。公开截图移除了个人关注记录。
+<a id="07-stock-evidence"></a>
 
-![博主观点雷达界面](assets/screenshots/08-creator-radar.jpg)
+### 个股研判：斐波那契参考与相关性证据
 
-<a id="09-portfolio"></a>
+入口：`/single-stock-overnight?symbol=SPY`
 
-### 持仓决策
+展示研究结论背后的辅助证据。斐波那契区间列出摆动高低点、回撤比例与对应价位，明确提示浅回撤区域在当前历史研究中的超额表现偏弱，帮助读者理解支撑阻力画线与实证信号之间的区别。
 
-入口：`/portfolio`。录入持仓、成本与可用现金，查看持仓权重、浮动盈亏、加仓／持有／减仓／平仓研究建议和风险价位。
+下方按与隔夜 Alpha 的相关性展示量能比、短期趋势、距均线位置等因子，并给出当前值、历史分位、Alpha 相关、次开相关和有效样本数。页面明确说明相关性不等于因果；这些卡片用于描述当前环境与历史样本的相似程度，不能据此直接推导交易结果。
 
-复盘组合和仓位管理。截图内资金与持仓全部为合成数据。
+![个股研判：斐波那契参考与相关性证据](assets/screenshots/desktop/07-stock-evidence.png)
 
-![持仓决策界面](assets/screenshots/09-portfolio.jpg)
+[查看完整原图](assets/screenshots/desktop/07-stock-evidence.png)
 
-<a id="10-soxl-paper"></a>
+<a id="08-news-cards"></a>
 
-### SOXL 实时模拟
+### 盘前新闻：宏观事件卡片与阅读反馈
 
-入口：`/soxl-quant`。展示实时行情连接状态、模拟账户、信号、成交与权益曲线，以及训练／验证／测试分段回测入口。
+入口：`/premarket-news`
 
-研究 SOXL 的行情驱动模拟；不会发送实盘券商订单。截图未连接实时行情。
+通过卡片逐条阅读盘前资讯。示例将美联储相关事件归为全市场宏观新闻，展示中文摘要、媒体来源、时间、主题、新闻方向、影响范围与冲击评分，使读者快速判断事件需要从大盘还是个股角度复核。
 
-![SOXL 实时模拟界面](assets/screenshots/10-soxl-paper.jpg)
+侧栏提供预计开盘影响、波动带宽和相关指数入口，原文与出处可展开查看；底部勾选与跳过按钮用于处理阅读队列和反馈。页面保留后台刷新状态与最新入库时间。冲击分、方向和影响带宽是不同维度，应配合正文与出处理解其含义。
 
-<a id="11-task-center"></a>
+![盘前新闻：宏观事件卡片与阅读反馈](assets/screenshots/desktop/08-news-cards.png)
 
-### 任务中心
+[查看完整原图](assets/screenshots/desktop/08-news-cards.png)
 
-入口：`/batch-tasks`。查看定时扫描、批处理进度、榜单快照、样本外采集和校准曲线状态；配置后的移动访问地址也在这里展示。
+<a id="09-news-list"></a>
 
-检查每日研究任务与数据准备状态。私有访问地址不公开。
+### 盘前新闻：筛选清单与跨事件比较
 
-![任务中心界面](assets/screenshots/11-task-center.jpg)
+入口：`/premarket-news/list`
 
-<a id="12-launch-signal"></a>
+以清单集中比较宏观与个股新闻，支持时间范围、未读状态和分数筛选，并提供手动更新入口。顶部统计队列规模、正负面数量、可能板块扩散与股票池覆盖状态，适合检查盘前阅读任务的范围。
 
-### 启动信号
+每行同时展示标的、新闻要点、事件标签、冲击分、开盘影响、行情状态、发布时间和赛道或来源。截图中的“待补齐”状态保留，提醒读者该行行情上下文尚未准备完成；可据此先复核资讯，再等待行情数据完善。
 
-入口：`/launch-signal`。配置研究股票池与筛选参数，查看量化启动信号排名和历史影响校准入口。
+![盘前新闻：筛选清单与跨事件比较](assets/screenshots/desktop/09-news-list.png)
 
-探索原始信号，辅助后续验证。
+[查看完整原图](assets/screenshots/desktop/09-news-list.png)
 
-![启动信号界面](assets/screenshots/12-launch-signal.jpg)
+<a id="10-watchlist"></a>
 
-<a id="13-stock-signals"></a>
+### 自选池：研究范围、备注与批量分析
 
-### 实股信号
+入口：`/watchlist`
 
-入口：`/stock-signals`。通过实股机会筛选工具浏览机会观察清单，查看信号详情与研究解释。
+维护个人研究股票池，支持单只添加、填写关注原因和批量导入，并提供自选池三层分析入口。截图展示实际自选列表及备注，说明研究范围可以由使用者主动维护，模型运行时也会明确标注来源池。
 
-集中观察股票信号；结果依赖对应数据源与研究口径。
+列表汇总现价、当日表现、市值与 PE、行业、20 日表现、60 日 Alpha、回调或启动状态、GEX、财报时间和 Alpha 胜率。页面注明 Alpha 基准为纳斯达克／QQQ，并显示后台补充进度；数据不完整、无信号和已有信号的状态可以分别辨认。
 
-![实股信号界面](assets/screenshots/13-stock-signals.jpg)
+![自选池：研究范围、备注与批量分析](assets/screenshots/desktop/10-watchlist.png)
 
-<a id="14-event-radar"></a>
+[查看完整原图](assets/screenshots/desktop/10-watchlist.png)
 
-### 事件雷达
+<a id="11-creator-radar"></a>
 
-入口：`/event-radar`。围绕统一股票池查看短期启动事件、扫描参数、历史影响校准及排名。
+### 博主观点雷达：视频摘要与赛道传导
 
-把新闻和事件线索与价格研究结合。
+入口：`/creator-opinions`
 
-![事件雷达界面](assets/screenshots/14-event-radar.jpg)
+把长视频观点整理为可浏览的研究线索。每条记录保留博主、视频标题、发布时间、字幕与观点处理状态、语言和原视频链接，同时用摘要概括视频讨论的宏观背景、行业变化与个股判断。
 
-<a id="15-macro-panic"></a>
+个股观点与赛道传导分栏呈现，并以 bullish、bearish、neutral、mixed 标签区分倾向。读者可以对比不同来源对同一股票或主题的看法，再回到原视频确认语境；这些标签表达内容中的观点，不是项目对标的的统一结论。
 
-### 宏观恐慌雷达
+![博主观点雷达：视频摘要与赛道传导](assets/screenshots/desktop/11-creator-radar.png)
 
-入口：`/macro-panic-radar`。查看 VIX／可用代理指标、市场恐慌状态、系统性危机过滤和计算来源说明。
+[查看完整原图](assets/screenshots/desktop/11-creator-radar.png)
 
-为个股研究补充宏观风险环境；代理指标与官方 VIX 会分开标注。
+<a id="12-task-center"></a>
 
-![宏观恐慌雷达界面](assets/screenshots/15-macro-panic.jpg)
+### 任务中心：每日扫描进度与运行结果
 
-<a id="16-signal-dashboard"></a>
+入口：`/batch-tasks`
 
-### 三维信号汇总
+查看每日三层扫描是否完成、当前处理进度、计划时间、启用状态和最近运行结果。截图保留本次 running 与上次 failed 两种状态，让读者了解任务中心如何区分正在执行的扫描与历史执行记录。
 
-入口：`/signal-dashboard`。将多个研究维度汇总到统一表格，结合历史验证、研究概率、风险收益与可执行性完成复核。
+页面支持继续未完成池、强制重跑和恢复榜单，并按股票池显示复用或完成情况；新闻更新、事件补充和 AI 复核另有状态说明。飞书移动端区域在截图中显示隧道未运行，没有公开访问地址。这里适合定位数据准备或扫描任务的卡点，再选择相应恢复操作。
 
-跨模块比较同一批候选。
+![任务中心：每日扫描进度与运行结果](assets/screenshots/desktop/12-task-center.png)
 
-![三维信号汇总界面](assets/screenshots/16-signal-dashboard.jpg)
+[查看完整原图](assets/screenshots/desktop/12-task-center.png)
 
-<a id="17-overnight-cockpit"></a>
+## 移动端功能展示
 
-### 隔夜驾驶舱
-
-入口：`/overnight-cockpit`。围绕尾盘到次日开盘的研究场景，比较指数池候选、基准、隔夜信息和风险上下文。
-
-研究隔夜策略与所属指数的相对表现。
-
-![隔夜驾驶舱界面](assets/screenshots/17-overnight-cockpit.jpg)
-
-<a id="18-alpha-library"></a>
-
-### Alpha 因子库
-
-入口：`/alpha-zoo`。浏览 Qlib 158、Kakushadze 101、GTJA 191 与 Academic 四类预置因子；可按库、主题与股票池筛选。
-
-寻找因子研究起点。
-
-![Alpha 因子库界面](assets/screenshots/18-alpha-library.jpg)
-
-<a id="19-alpha-detail"></a>
-
-### Alpha 因子详情
-
-入口：`/alpha-zoo/academic_carhart_mom`。展示单因子的公式、主题、适用股票池、频率、预热要求、备注与源码入口。
-
-审查因子定义和实现，再决定是否评估。
-
-![Alpha 因子详情界面](assets/screenshots/19-alpha-detail.jpg)
-
-<a id="20-alpha-benchmark"></a>
-
-### Alpha Bench
-
-入口：`/alpha-zoo/bench`。配置因子库、股票池与时间区间，运行批量评估并查看进度和结果。
-
-在自己的数据和范围上验证因子；截图没有触发真实评估。
-
-![Alpha Bench界面](assets/screenshots/20-alpha-benchmark.jpg)
-
-<a id="21-research-agent"></a>
-
-### 研究助手
-
-入口：`/agent`。用自然语言发起研究，查看工具执行反馈、会话与研究产物；模型与 MCP 工具由使用者配置。
-
-从问题出发组织研究流程。当前默认导航隐藏该入口，但路由仍可直接访问。
-
-![研究助手界面](assets/screenshots/21-research-agent.jpg)
-
-<a id="22-backtest-detail"></a>
-
-### 回测运行详情
-
-入口：`/runs/:runId`。查看运行状态、权益与回撤、指标、交易记录、策略代码、报告和可用验证产物。
-
-复核一次策略运行的过程和结果。截图使用合成演示运行，非真实业绩。
-
-![回测运行详情界面](assets/screenshots/22-backtest-detail.jpg)
-
-<a id="23-strategy-compare"></a>
-
-### 策略对比
-
-入口：`/compare`。选择两次运行，对比权益与回撤曲线及关键回测指标。
-
-比较策略、参数或研究方案。截图的两次运行均为合成演示。
-
-![策略对比界面](assets/screenshots/23-strategy-compare.jpg)
-
-<a id="24-correlation"></a>
-
-### 相关性矩阵
-
-入口：`/correlation`。输入多资产代码、窗口期与 Pearson／Spearman 方法，展示相关性矩阵。
-
-观察资产关系与分散程度。截图矩阵使用合成数据。
-
-![相关性矩阵界面](assets/screenshots/24-correlation.jpg)
-
-<a id="25-settings"></a>
-
-### 设置
-
-入口：`/settings`。配置本地 API 认证、模型提供商、模型名、生成参数与可选行情数据源。GilData MCP 地址和 token 当前通过本地 agent/.env 配置。
-
-连接自己的服务。截图不含密钥、地址或密钥提示片段。
-
-![设置界面](assets/screenshots/25-settings.jpg)
+移动端图片保持原有版本，按手机布局展示常用研究入口。
 
 <a id="27-mobile-board"></a>
 
@@ -311,9 +205,9 @@ GilData MCP 是金融研究数据接入能力的组成部分：当前代码通�
 
 入口：`/m`。以手机卡片布局查看研究候选，并进入个股研究。
 
-在移动设备上快速浏览榜单。
+![移动端 · 榜单](assets/screenshots/27-mobile-board.jpg)
 
-![移动端 · 榜单界面](assets/screenshots/27-mobile-board.jpg)
+[查看原图](assets/screenshots/27-mobile-board.jpg)
 
 <a id="28-mobile-news"></a>
 
@@ -321,9 +215,9 @@ GilData MCP 是金融研究数据接入能力的组成部分：当前代码通�
 
 入口：`/m/news`。在手机布局中阅读盘前资讯和研究线索。
 
-碎片时间浏览新闻。
+![移动端 · 新闻](assets/screenshots/28-mobile-news.jpg)
 
-![移动端 · 新闻界面](assets/screenshots/28-mobile-news.jpg)
+[查看原图](assets/screenshots/28-mobile-news.jpg)
 
 <a id="29-mobile-stock"></a>
 
@@ -331,19 +225,19 @@ GilData MCP 是金融研究数据接入能力的组成部分：当前代码通�
 
 入口：`/m/stock?symbol=SPY`。展示个股报价、研究行动区间、风险价位与核心研究信息。
 
-移动端复核某只股票。
+![移动端 · 个股](assets/screenshots/29-mobile-stock.jpg)
 
-![移动端 · 个股界面](assets/screenshots/29-mobile-stock.jpg)
+[查看原图](assets/screenshots/29-mobile-stock.jpg)
 
 <a id="30-mobile-portfolio"></a>
 
 ### 移动端 · 持仓
 
-入口：`/m/portfolio`。以手机布局查看账户摘要、持仓与仓位研究建议。
+入口：`/m/portfolio`。以手机布局查看账户摘要、持仓与仓位研究建议。 资金与持仓为合成演示数据。
 
-移动端复盘持仓。资金与持仓仍为合成演示。
+![移动端 · 持仓](assets/screenshots/30-mobile-portfolio.jpg)
 
-![移动端 · 持仓界面](assets/screenshots/30-mobile-portfolio.jpg)
+[查看原图](assets/screenshots/30-mobile-portfolio.jpg)
 
 <a id="31-mobile-watchlist"></a>
 
@@ -351,9 +245,9 @@ GilData MCP 是金融研究数据接入能力的组成部分：当前代码通�
 
 入口：`/m/watchlist`。在手机上维护和查看自选研究范围。
 
-快速管理关注标的。个人自选未公开。
+![移动端 · 自选](assets/screenshots/31-mobile-watchlist.jpg)
 
-![移动端 · 自选界面](assets/screenshots/31-mobile-watchlist.jpg)
+[查看原图](assets/screenshots/31-mobile-watchlist.jpg)
 
 <a id="32-mobile-more"></a>
 
@@ -361,6 +255,45 @@ GilData MCP 是金融研究数据接入能力的组成部分：当前代码通�
 
 入口：`/m/more`。汇总交易台、进阶研究和系统入口，可切换到桌面完整版。
 
-查找完整功能；部分进阶工具沿用桌面布局。
+![移动端 · 更多](assets/screenshots/32-mobile-more.jpg)
 
-![移动端 · 更多界面](assets/screenshots/32-mobile-more.jpg)
+[查看原图](assets/screenshots/32-mobile-more.jpg)
+
+## 完整页面与功能索引
+
+以下保留全部页面和看板标签入口。图片列链接至本次提供的对应展示；未提供原图的页面以功能说明收录。
+
+| 页面 | 路由／入口 | 功能说明 | 截图 |
+| --- | --- | --- | --- |
+| 回调买入榜 | `/` | 按回调信号、历史校准口径、相对大盘强度和流动性筛选研究候选；可切换高流动性、深超卖与单腿期权快照。 | [查看](#01-priority-overview) |
+| 持续监测 | `/ → 持续监测` | 跟踪候选首次出现、连续观察、排名变化及失效状态，复核信号的生命周期。 | 未提供对应桌面原图 |
+| 兑现对账 | `/ → 兑现对账` | 查看已记录预测的结算、命中口径、净超额、可靠性分桶和排名分桶；区分前向记录与历史回放。 | 未提供对应桌面原图 |
+| 今日篮子 | `/ → 今日篮子` | 以预算、候选数量和权重方式生成候选研究篮子，辅助比较组合分配。 | 未提供对应桌面原图 |
+| 盘前新闻 · 卡片 | `/premarket-news` | 用卡片浏览新闻，查看涉及标的、事件解释与重要性；通过勾叉反馈调整后续新闻偏好。 | [查看](#08-news-cards) |
+| 盘前新闻 · 清单 | `/premarket-news/list` | 以列表方式查看盘前资讯，按页面提供的条件筛选与复核新闻上下文。 | [查看](#09-news-list) |
+| 个股研判 | `/single-stock-overnight?symbol=SPY` | 汇总公司与赛道背景、价格图表、技术指标、关键行动区间、风险信息和研究复核；可加入自选池。GilData 的规范化研究样本可作为补充上下文。 | [查看](#03-stock-chart) |
+| 自选池 | `/watchlist` | 单只或批量添加标的、管理启用状态、备注和删除；汇总自选标的的研究指标并触发自选范围复核。 | [查看](#10-watchlist) |
+| 博主观点雷达 | `/creator-opinions` | 汇总配置频道的视频记录、观点、股票标签与赛道信号，将非结构化观点纳入研究观察。 | [查看](#11-creator-radar) |
+| 持仓决策 | `/portfolio` | 录入持仓、成本与可用现金，查看持仓权重、浮动盈亏、加仓／持有／减仓／平仓研究建议和风险价位。 | 未提供对应桌面原图 |
+| SOXL 实时模拟 | `/soxl-quant` | 展示实时行情连接状态、模拟账户、信号、成交与权益曲线，以及训练／验证／测试分段回测入口。 | 未提供对应桌面原图 |
+| 任务中心 | `/batch-tasks` | 查看定时扫描、批处理进度、榜单快照、样本外采集和校准曲线状态；配置后的移动访问地址也在这里展示。 | [查看](#12-task-center) |
+| 启动信号 | `/launch-signal` | 配置研究股票池与筛选参数，查看量化启动信号排名和历史影响校准入口。 | 未提供对应桌面原图 |
+| 实股信号 | `/stock-signals` | 通过实股机会筛选工具浏览机会观察清单，查看信号详情与研究解释。 | 未提供对应桌面原图 |
+| 事件雷达 | `/event-radar` | 围绕统一股票池查看短期启动事件、扫描参数、历史影响校准及排名。 | 未提供对应桌面原图 |
+| 宏观恐慌雷达 | `/macro-panic-radar` | 查看 VIX／可用代理指标、市场恐慌状态、系统性危机过滤和计算来源说明。 | 未提供对应桌面原图 |
+| 三维信号汇总 | `/signal-dashboard` | 将多个研究维度汇总到统一表格，结合历史验证、研究概率、风险收益与可执行性完成复核。 | 未提供对应桌面原图 |
+| 隔夜驾驶舱 | `/overnight-cockpit` | 围绕尾盘到次日开盘的研究场景，比较指数池候选、基准、隔夜信息和风险上下文。 | 未提供对应桌面原图 |
+| Alpha 因子库 | `/alpha-zoo` | 浏览 Qlib 158、Kakushadze 101、GTJA 191 与 Academic 四类预置因子；可按库、主题与股票池筛选。 | 未提供对应桌面原图 |
+| Alpha 因子详情 | `/alpha-zoo/academic_carhart_mom` | 展示单因子的公式、主题、适用股票池、频率、预热要求、备注与源码入口。 | 未提供对应桌面原图 |
+| Alpha Bench | `/alpha-zoo/bench` | 配置因子库、股票池与时间区间，运行批量评估并查看进度和结果。 | 未提供对应桌面原图 |
+| 研究助手 | `/agent` | 用自然语言发起研究，查看工具执行反馈、会话与研究产物；模型与 MCP 工具由使用者配置。 | 未提供对应桌面原图 |
+| 回测运行详情 | `/runs/:runId` | 查看运行状态、权益与回撤、指标、交易记录、策略代码、报告和可用验证产物。 | 未提供对应桌面原图 |
+| 策略对比 | `/compare` | 选择两次运行，对比权益与回撤曲线及关键回测指标。 | 未提供对应桌面原图 |
+| 相关性矩阵 | `/correlation` | 输入多资产代码、窗口期与 Pearson／Spearman 方法，展示相关性矩阵。 | 未提供对应桌面原图 |
+| 设置 | `/settings` | 配置本地 API 认证、模型提供商、模型名、生成参数与可选行情数据源。GilData MCP 地址和 token 当前通过本地 agent/.env 配置。 | 未提供对应桌面原图 |
+| 移动端 · 榜单 | `/m` | 以手机卡片布局查看研究候选，并进入个股研究。 | [查看](#27-mobile-board) |
+| 移动端 · 新闻 | `/m/news` | 在手机布局中阅读盘前资讯和研究线索。 | [查看](#28-mobile-news) |
+| 移动端 · 个股 | `/m/stock?symbol=SPY` | 展示个股报价、研究行动区间、风险价位与核心研究信息。 | [查看](#29-mobile-stock) |
+| 移动端 · 持仓 | `/m/portfolio` | 以手机布局查看账户摘要、持仓与仓位研究建议。 | [查看](#30-mobile-portfolio) |
+| 移动端 · 自选 | `/m/watchlist` | 在手机上维护和查看自选研究范围。 | [查看](#31-mobile-watchlist) |
+| 移动端 · 更多 | `/m/more` | 汇总交易台、进阶研究和系统入口，可切换到桌面完整版。 | [查看](#32-mobile-more) |
