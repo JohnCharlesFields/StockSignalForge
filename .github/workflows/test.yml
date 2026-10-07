@@ -10,6 +10,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      VIBE_MARKET_DATA_CACHE_DIR: ${{ runner.temp }}/stocksignalforge-market-data
 
     steps:
       - uses: actions/checkout@v4

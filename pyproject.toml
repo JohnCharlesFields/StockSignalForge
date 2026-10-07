@@ -45,6 +45,7 @@ dependencies = [
     "yfinance>=0.2.30",
     "akshare>=1.12.0",
     "ccxt>=4.0.0",
+    "databento>=0.80.0",
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.0.0",
@@ -60,10 +61,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://vibetrading.wiki/"
-Documentation = "https://vibetrading.wiki/docs/"
-Repository = "https://github.com/HKUDS/Vibe-Trading"
-Issues = "https://github.com/HKUDS/Vibe-Trading/issues"
+Homepage = "https://github.com/JohnCharlesFields/StockSignalForge"
+Documentation = "https://github.com/JohnCharlesFields/StockSignalForge/blob/main/SCREENSHOTS.md"
+Repository = "https://github.com/JohnCharlesFields/StockSignalForge"
+Issues = "https://github.com/JohnCharlesFields/StockSignalForge/issues"
 
 [project.scripts]
 vibe-trading = "cli:main"

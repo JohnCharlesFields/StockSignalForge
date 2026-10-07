@@ -1,14 +1,48 @@
 # StockSignalForge · 股讯工坊
 
-**AI 股票分析、信号扫描与策略回测。**
+**基于 GilData MCP 打造的 AI 股票研究工作台。**
 
-基于 GilData MCP（恒生聚源金融数据服务）接入能力扩展的金融研究工作台，支持自然语言研究、策略回测、个股分析与持仓复盘。
+AI 股票分析 · 信号扫描 · 个股研判 · 持仓复盘 · 策略回测
+
+StockSignalForge（股讯工坊）以 GilData MCP（恒生聚源金融数据服务）的研究数据接入为特色，将金融数据查询、研究上下文、图表分析和策略验证组织在一个工作台中。
 
 代码框架源自 [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading)，保留上游 MIT 许可与版权声明。GilData MCP 是本项目接入的外部数据服务；本仓库不包含该服务源码、凭据或商用数据，也不代表 GilData 官方产品。当前 GilData 适配用于显式触发的研究补充与缓存读取，并非全部行情与回测数据的唯一来源。
 
 GilData MCP 服务与授权申请请参见 [恒生聚源数据地图](https://www.gildata.com/products/datamap)。使用者自行配置 MCP 与各数据源 API key。
 
-## 功能
+## 界面预览
+
+[完整页面图册：32 张截图与逐页功能说明](SCREENSHOTS.md) · [GilData MCP 接入说明](GILDATA_MCP.md)
+
+截图来自实际应用，个人信息与配置已移除。行情画面为缓存快照；持仓、回测与相关性示例为合成数据，不是业绩展示。
+
+![回调买入榜与候选监测](assets/screenshots/01-priority-board.jpg)
+
+![个股研判与行情图表](assets/screenshots/06-single-stock.jpg)
+
+## 功能地图
+
+| 模块 | 能做什么 |
+| --- | --- |
+| 交易台 | 回调候选排序、连续监测、预测兑现对账与候选篮子 |
+| 个股研究 | 行情图表、公司与赛道背景、研究信号和风险价位 |
+| 新闻与观点 | 盘前卡片／清单、观点雷达与事件线索 |
+| 自选与持仓 | 管理研究范围、复盘成本和仓位、比较研究建议 |
+| 进阶研究 | 启动信号、实股机会、事件雷达、宏观风险与三维汇总 |
+| 策略验证 | 因子库与 Bench、回测详情、策略对比和相关性矩阵 |
+| 自动化与助手 | 任务中心、研究会话、工具反馈与 MCP 服务 |
+| 移动端 | 榜单、新闻、个股、持仓、自选和更多入口 |
+
+### GilData MCP 在项目中的作用
+
+- 调用 GilData MCP 的 FinQuery 接口获取研究补充数据。
+- 对返回表格做结构化解析，并检查股票、日期、币种与数据口径。
+- 将规范化样本缓存给个股研究上下文使用；普通页面读取不会自动触发 GilData 查询。
+- 通过本地环境变量配置地址与 token，公开代码不包含私有 MCP 配置。
+
+GilData 是外部金融数据服务；项目的代码框架、其他行情来源与策略验证能力有各自的来源和实现，详见 [接入说明](GILDATA_MCP.md)。
+
+## 基础能力
 
 - React 前端与 FastAPI 后端，Docker 单容器运行。
 - 交易研究、策略回测、个股研判、持仓分析与研究会话。
@@ -25,7 +59,7 @@ Copy-Item agent/.env.example agent/.env
 docker compose up -d --build vibe-trading
 ```
 
-打开 [本地网页](http://127.0.0.1:19090)，健康检查地址为 http://127.0.0.1:19090/health。也可运行 Windows 的 ./start.ps1。
+打开 [本地网页](http://127.0.0.1:19090)，可用 [健康检查](http://127.0.0.1:19090/health) 验证服务。也可运行 Windows 的 ./start.ps1。
 
 ```powershell
 docker compose logs --tail 100 vibe-trading
