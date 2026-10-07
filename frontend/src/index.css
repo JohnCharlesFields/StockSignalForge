@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light mode surfaces */
+    --background: 220 20% 98%;
+    --foreground: 220 20% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 10%;
+
+    /* Brand accent */
+    --primary: 27 90% 52%;
+    --primary-foreground: 0 0% 100%;
+
+    --muted: 220 14% 92%;
+    --muted-foreground: 220 14% 46%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 14% 87%;
+    --radius: 0.5rem;
+
+    /* Semantic colors */
+    --success: 142 71% 45%;
+    --danger: 0 84% 60%;
+    --warning: 38 92% 50%;
+    --info: 217 91% 60%;
+
+    /* Chart tokens */
+    --chart-grid: 220 14% 90%;
+    --chart-text: 220 14% 46%;
+    --chart-axis: 220 14% 80%;
+    --chart-compare-a: #3b82f6;
+    --chart-compare-b: #f59e0b;
+  }
+
+  .dark {
+    /* Dark mode: 4-level surface system */
+    --background: 220 20% 5%;       /* bg-base */
+    --foreground: 220 10% 92%;
+    --card: 220 20% 8%;             /* surface-1 */
+    --card-foreground: 220 10% 92%;
+
+    --primary: 27 90% 52%;
+    --primary-foreground: 0 0% 100%;
+
+    --muted: 220 20% 13%;           /* surface-2 */
+    --muted-foreground: 220 10% 55%;
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 20% 18%;          /* surface-3 */
+
+    /* Semantic colors */
+    --success: 142 71% 45%;
+    --danger: 0 62% 50%;
+    --warning: 38 92% 50%;
+    --info: 217 91% 60%;
+
+    /* Chart tokens */
+    --chart-grid: 220 20% 12%;
+    --chart-text: 220 10% 42%;
+    --chart-axis: 220 20% 22%;
+    --chart-compare-a: #60a5fa;
+    --chart-compare-b: #fbbf24;
+  }
+
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground; }
+
+  /* Prose table enhancements */
+  .prose table { border-collapse: collapse; width: 100%; }
+  .prose th, .prose td { border: 1px solid hsl(var(--border)); }
+  .prose tbody tr:nth-child(even) { background: hsl(var(--muted) / 0.3); }
+
+  /* Smooth scrollbar for webkit */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
+}
+
+/* ===========================================================================
+   Mobile module (Feishu/Lark WebView). All rules are scoped to the mobile
+   shell via `.m-app` / `html.m-active` so the desktop app is untouched.
+   =========================================================================== */
+@layer components {
+  /* Full-height app frame: dvh first, vh fallback for older WebViews. */
+  .m-app {
+    height: 100vh;
+    height: 100dvh;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  /* iOS safe-area insets (needs viewport-fit=cover in the meta tag). */
+  .m-safe-top { padding-top: env(safe-area-inset-top, 0px); }
+  .m-safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+  /* Smooth, contained scrolling so rubber-banding doesn't drag the chrome. */
+  .m-scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+  }
+}
+
+/* While the mobile shell is mounted, kill horizontal page scroll and stop iOS
+   from auto-zooming form fields (font-size >= 16px). Scoped to html.m-active. */
+html.m-active,
+html.m-active body {
+  overflow-x: hidden;
+  width: 100%;
+  max-width: 100%;
+}
+html.m-active input,
+html.m-active textarea,
+html.m-active select {
+  font-size: 16px;
+}
+/* Long unbroken tokens (tickers, urls, numbers) must wrap, never overflow. */
+html.m-active .m-break { overflow-wrap: anywhere; word-break: break-word; }

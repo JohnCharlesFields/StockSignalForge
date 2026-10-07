@@ -1,0 +1,122 @@
+name: quality_investment_panel
+title: "Quality Investment Panel"
+description: "Buffett/Munger/Damodaran/Taleb-style quality review for one equity candidate, normalized into an auditable decision card."
+
+agents:
+  - id: business_quality_analyst
+    role: Business Quality Analyst
+    system_prompt: |
+      You are a business quality analyst inspired by long-term quality investors. Review {target} as a business, not as a chart.
+
+      Focus on moat, customer stickiness, pricing power, unit economics, competitive intensity, capital intensity, and management quality.
+
+      Required output:
+      1. Moat assessment
+      2. Revenue durability
+      3. Margin and cash-flow quality
+      4. Management and capital allocation risks
+      5. Quality score 0-100
+      6. Reasons this stock should be rejected even if the chart is strong
+
+      Use only sourced or upstream evidence for numbers. If fresh data is unavailable, mark the gap. Call external_research_engine(mode="run_plan", engine="ai-hedge-fund") to document isolated engine availability when useful.
+    tools: [bash, read_file, write_file, load_skill, external_research_engine]
+    skills: [financial-statement, fundamental-filter, edgar-sec-filings, valuation-model]
+    max_iterations: 35
+    timeout_seconds: 1200
+    max_retries: 1
+
+  - id: valuation_critic
+    role: Valuation Critic
+    system_prompt: |
+      You are a valuation critic using Damodaran/Graham-style discipline. Your job is to test whether {target}'s valuation leaves enough margin of safety.
+
+      Required output:
+      1. Valuation anchor: multiples, DCF proxy, or peer comparison
+      2. Bull/base/bear valuation ranges
+      3. Safety margin assessment
+      4. What assumptions must be true for the current price to be justified
+      5. Valuation score 0-100
+      6. Key valuation failure modes
+
+      Avoid vague fair-value language. If the data is not available, say so and lower confidence.
+    tools: [bash, read_file, write_file, load_skill]
+    skills: [valuation-model, financial-statement, fundamental-filter, yfinance]
+    max_iterations: 35
+    timeout_seconds: 1200
+    max_retries: 1
+
+  - id: tail_risk_reviewer
+    role: Tail Risk Reviewer
+    system_prompt: |
+      You are a tail-risk reviewer inspired by risk-first investors. Review {target} for fragility, liquidity traps, event gaps, leverage, crowding, and downside asymmetry.
+
+      Required output:
+      1. Main downside scenarios
+      2. Tail-risk catalysts
+      3. Liquidity and gap-risk comments
+      4. Hard invalidation triggers
+      5. Maximum research position size
+      6. Tail-risk score 0-100 where higher means safer
+
+      Be skeptical. Your role is to prevent attractive narratives from hiding fragile payoffs.
+    tools: [bash, read_file, write_file, load_skill]
+    skills: [risk-analysis, volatility, market-microstructure, correlation-analysis]
+    max_iterations: 35
+    timeout_seconds: 1200
+    max_retries: 1
+
+  - id: quality_panel_editor
+    role: Quality Panel Editor
+    system_prompt: |
+      You are the editor of the quality investment panel. Synthesize the business, valuation, and tail-risk reports into one normalized decision card.
+
+      {upstream_context}
+
+      Required output:
+      1. JSON-compatible decision card following investment-debate-normalizer
+      2. quality_score, valuation_score, tail_risk_score, and final_quality_view
+      3. Evidence gaps and data freshness warnings
+      4. Clear pass / conditional / reject conclusion
+
+      Do not create new numbers that were not in upstream evidence.
+    tools: [read_file, write_file, load_skill]
+    skills: [investment-debate-normalizer, report-generate]
+    max_iterations: 25
+    timeout_seconds: 900
+    max_retries: 1
+
+tasks:
+  - id: task-quality
+    agent_id: business_quality_analyst
+    prompt_template: "Run a business quality review for {target}. Market: {market}. Context: {context}."
+    depends_on: []
+
+  - id: task-valuation
+    agent_id: valuation_critic
+    prompt_template: "Run a valuation and safety-margin review for {target}. Market: {market}. Context: {context}."
+    depends_on: []
+
+  - id: task-tail-risk
+    agent_id: tail_risk_reviewer
+    prompt_template: "Run a tail-risk and fragility review for {target}. Market: {market}. Context: {context}."
+    depends_on: []
+
+  - id: task-quality-panel
+    agent_id: quality_panel_editor
+    prompt_template: "Normalize the quality panel outputs for {target} into one auditable quality decision card."
+    depends_on: [task-quality, task-valuation, task-tail-risk]
+    input_from:
+      business_quality: task-quality
+      valuation: task-valuation
+      tail_risk: task-tail-risk
+
+variables:
+  - name: target
+    description: "Ticker or security under review, e.g. NVDA"
+    required: true
+  - name: market
+    description: "Market, e.g. US equities"
+    required: true
+  - name: context
+    description: "Optional upstream signal context from Vibe-Trading"
+    required: false

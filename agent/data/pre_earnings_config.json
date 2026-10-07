@@ -1,0 +1,21 @@
+{
+  "signal_version": "v0.2.0",
+  "entry_window_min_trading_days": 6,
+  "entry_window_max_trading_days": 10,
+  "scheduled_exit_days_before_report": 2,
+  "max_holding_days": 8,
+  "min_price": 5.0,
+  "min_avg_dollar_volume_20d": 20000000,
+  "min_data_quality_score": 0.8,
+  "min_report_date_confidence": 0.7,
+  "min_final_score": 0.65,
+  "volume_ratio_threshold": 1.5,
+  "max_position_weight": 0.03,
+  "score_weights": {
+    "analyst_revision": 0.40,
+    "peer_inference": 0.25,
+    "relative_momentum": 0.20,
+    "revenue_revision": 0.15
+  },
+  "_comment": "该策略承担股票方向性风险，不是无风险套利。所有阈值为启发式阈值，尚未经过point-in-time历史回测校准。"
+}

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem("vibetrading-theme");
+        var resolved = stored === "dark" || stored === "light"
+          ? stored
+          : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", resolved);
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Research Lab | Vibe-Trading Wiki</title>
+  <meta name="description" content="Research Lab for Vibe-Trading.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Vibe-Trading Wiki">
+  <meta property="og:title" content="Research Lab">
+  <meta property="og:description" content="Research Lab for Vibe-Trading.">
+  <meta property="og:image" content="https://vibetrading.wiki/assets/icon.png">
+  <meta property="og:url" content="https://vibetrading.wiki/research-lab/">
+  <link rel="canonical" href="https://vibetrading.wiki/research-lab/">
+  <link rel="icon" type="image/png" href="/assets/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,750&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/main.js"></script>
+</head>
+<body>
+  <header class="site-header" id="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="/home/" aria-label="Vibe-Trading home">
+        <img class="brand__mark" src="/assets/icon.png" alt="" width="40" height="40">
+        <span class="brand__text">Vibe-Trading</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="/docs/">Docs</a>
+        <a href="/tutorials/">Tutorials</a>
+        <a href="/alpha-library/">Alpha Library</a>
+        <a href="/research-lab/">Research Lab</a>
+        <a href="https://github.com/HKUDS/Vibe-Trading">Source</a>
+      </nav>
+      <div class="site-actions">
+        <a class="star-pill" href="https://github.com/HKUDS/Vibe-Trading" aria-label="Vibe-Trading on GitHub">
+          <span aria-hidden="true">Star</span>
+          <strong id="star-count">--</strong>
+        </a>
+        <button class="icon-button" id="theme-toggle" type="button" aria-label="Toggle color theme">
+          <span class="theme-icon" aria-hidden="true"></span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="section-page">
+    <section class="section-hero section-hero--blank">
+      <p class="eyebrow">Research Lab</p>
+      <h1>Research Lab.</h1>
+      <p class="section-hero__lede">Long-form analyses, replicable backtests, and post-mortems on quant ideas. Open data + open code; every claim is one CLI command away.</p>
+    </section>
+
+    <section class="posts-grid" aria-label="Latest posts">
+      <article class="post-card">
+        <p class="post-card__date">2026-05-17</p>
+        <h2 class="post-card__title">
+          <a href="/research-lab/posts/alpha-191-in-2026.html">Which of the 191 GTJA alphas still work in 2026?</a>
+        </h2>
+        <p class="post-card__excerpt">
+          We re-ran the 191 short-horizon alphas published by Guotai Junan in 2014 against CSI 300, 2018&ndash;2025. Aggregate IC, theme survival rates, and the formulas that still hold up &mdash; reproducible with one CLI command.
+        </p>
+        <p class="post-card__meta"><span>Alpha Zoo</span> &middot; <span>GTJA 191</span> &middot; <span>CSI 300</span> &middot; <span>8 years (2018&ndash;2025)</span></p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>Vibe-Trading Wiki</span>
+    <a href="/docs/">Docs</a>
+    <a href="/tutorials/">Tutorials</a>
+    <a href="/alpha-library/">Alpha Library</a>
+    <a href="/research-lab/">Research Lab</a>
+    <a href="https://github.com/HKUDS/Vibe-Trading">GitHub</a>
+  </footer>
+</body>
+</html>

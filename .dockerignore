@@ -1,0 +1,66 @@
+# Version control & CI
+.git/
+.github/
+
+# IDE & editor
+.claude/
+.vscode/
+.editorconfig
+
+# Python artifacts
+.venv/
+.venv*/
+.pip-cache/
+.agents/
+.runtime/
+.tmp*/
+tmp*/
+pytest-cache-files-*/
+data_cache/
+paper/
+agent/.venv/
+agent/data_cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+agent/vibe_trading.egg-info/
+agent/vibe_trading_ai.egg-info/
+agent/__pycache__/
+
+# Runtime data (generated at runtime, not in repo)
+data/
+agent/runs/
+agent/sessions/
+agent/.swarm/runs/
+agent/.ui_runtime/
+agent/.tasks/
+
+# Env files (mounted via docker-compose env_file)
+.env
+agent/.env
+daily_stock_analysis/.env
+
+# Frontend build (built inside Docker, don't copy local)
+frontend/dist/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
+
+# Migrated daily-stock runtime data and legacy export bundles stay on host.
+# The SQLite database is mounted read-only by docker-compose.
+daily_stock_analysis/data/
+daily_stock_analysis/*.tar.gz
+
+# Tests & docs (not needed in production image)
+agent/tests/
+docs/
+assets/
+build/
+dist/
+
+# Project docs
+CLAUDE.md
+CONTRIBUTING.md
+*.md
+!README.md
+!LICENSE

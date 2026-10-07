@@ -1,0 +1,89 @@
+services:
+  vibe-trading:
+    build: .
+    ports:
+      - "127.0.0.1:19090:8899"
+    env_file:
+      - agent/.env
+    environment:
+      - VIBE_TRADING_TRUST_DOCKER_LOOPBACK=1
+      # Allow the Cloudflare Quick Tunnel (cloudflared on the Docker network) to
+      # reach the API without an API key. The host port stays bound to
+      # 127.0.0.1, so only the tunnel benefits. Anyone with the random
+      # trycloudflare URL can access the app — fine for personal/temporary use.
+      - VIBE_TRADING_TRUST_TUNNEL=0
+    volumes:
+      - vibe-runs:/app/agent/runs
+      - vibe-sessions:/app/agent/sessions
+      - vibe-data-cache:/app/agent/data_cache
+      - ./daily_stock_analysis/data:/app/daily_stock_analysis/data:ro
+      # Read the Cloudflare tunnel URL (written by start-feishu-mobile.ps1) so the
+      # 任务中心 page can display it. Read-only; never written by the app.
+      - ./.runtime:/app/.runtime:ro
+    restart: always
+    # Explicit healthcheck (mirrors the image HEALTHCHECK) so dependents can
+    # gate on `service_healthy`. Uses python (present in the image; no curl).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8899/health', timeout=4).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Temporary public HTTPS mapping for the Feishu/Lark mobile WebView.
+  # Cloudflare Quick Tunnel — no account/token/fixed domain required.
+  # Only starts under the `feishu` profile; never exposes a host port.
+  # Reaches the web app over the Docker network via the service name + internal
+  # port (http://vibe-trading:8899), NOT the host 127.0.0.1:19090 mapping.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --protocol
+      - http2
+      # Metrics server on the Docker network (NOT published to host). The backend
+      # reads the live quick-tunnel hostname from http://cloudflared:2000/quicktunnel
+      # so the 任务中心 card always shows the current URL, even after a restart.
+      - --metrics
+      - 0.0.0.0:2000
+      - --url
+      - http://vibe-trading:8899
+    environment:
+      # Optional host proxy (Clash/Mihomo). Leave empty to connect directly.
+      # If needed, set CLOUDFLARED_HTTP(S)_PROXY=http://host.docker.internal:7890
+      # in a local .env — do NOT use 127.0.0.1 (that is the container itself).
+      HTTP_PROXY: ${CLOUDFLARED_HTTP_PROXY:-}
+      HTTPS_PROXY: ${CLOUDFLARED_HTTPS_PROXY:-}
+      NO_PROXY: vibe-trading,localhost,127.0.0.1
+      # Real Cloudflare edge IPs (host:port,...). Needed when the host DNS uses
+      # Fake-IP (Clash/Mihomo 198.18.x.x), which otherwise breaks the tunnel
+      # data-plane. The start script auto-fills this via DoH; empty = default discovery.
+      TUNNEL_EDGE: ${CLOUDFLARED_EDGE:-}
+    restart: unless-stopped
+    depends_on:
+      vibe-trading:
+        condition: service_healthy
+    profiles:
+      - feishu
+
+  frontend:
+    image: node:20
+    working_dir: /app
+    ports:
+      - "5899:5899"
+    volumes:
+      - ./frontend:/app
+    environment:
+      - VITE_API_URL=http://vibe-trading:8899
+    command: sh -c "npm install && npm run dev -- --host --port 5899"
+    profiles:
+      - frontend
+    depends_on:
+      vibe-trading:
+        condition: service_started
+
+volumes:
+  vibe-runs:
+  vibe-sessions:
+  vibe-data-cache:

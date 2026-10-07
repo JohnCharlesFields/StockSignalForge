@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  daily-stock-analysis:
+    image: daily-stock-analysis-finnhub:local
+    container_name: daily-stock-analysis
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./patches:/app/patches
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+      - LLM_DEEPSEEK_MODELS=${LLM_DEEPSEEK_MODELS:-deepseek-v4-pro}
+      - LITELLM_MODEL=${LITELLM_MODEL:-deepseek/deepseek-v4-pro}
+      - LONGBRIDGE_APP_KEY=${LONGBRIDGE_APP_KEY}
+      - LONGBRIDGE_APP_SECRET=${LONGBRIDGE_APP_SECRET}
+      - LONGBRIDGE_ACCESS_TOKEN=${LONGBRIDGE_ACCESS_TOKEN}
+      - TUSHARE_TOKEN=${TUSHARE_TOKEN}
+      - TUSHARE_API_URL=${TUSHARE_API_URL:-http://api.tushare.pro}
+      - REPORT_TYPE=full

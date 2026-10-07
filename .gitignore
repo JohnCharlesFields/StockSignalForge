@@ -1,0 +1,137 @@
+.venv/
+.venv311/
+agent/.venv/
+__pycache__/
+.pytest_cache/
+.pytest_tmp/
+.tmp_pytest*/
+*.pyc
+
+.env
+agent/.env
+
+.claude/*
+!.claude/hooks.json
+CLAUDE.md
+.vscode/
+learn-claude-code-main/
+agent/sessions/
+agent/runs/
+agent/data_cache/
+agent/.ui_runtime/
+agent/.tasks/
+agent/uploads/
+agent/tests/*_result.json
+.ruff_cache/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+wiki/node_modules/
+wiki/dist/
+wiki/.astro/
+wiki/.vite/
+wiki/.wrangler/
+wiki/.cache/
+.vibe-dev/
+.vibe-record/
+.cache/
+.remotion/
+.tmp/
+tmp*/
+
+# DuckDB data cache
+data/*.duckdb
+data/*.duckdb.wal
+data/.duckdb_tmp/
+data/parquet/
+data/backup/
+
+# Internal docs (plans, specs)
+docs/
+!wiki/docs/
+!wiki/docs/**
+data/minutes/
+data/overnight*.log
+data/*.log
+data/test_write.txt
+agent/.pytest_tmp/
+agent/pytest_run_*/
+agent/test_cache/
+agent/tmp_pytest_cache/
+agent/vibe_trading.egg-info/
+agent/vibe_trading_ai.egg-info/
+agent/tests/e2e_backtest/
+dist/
+build/
+
+# Local demo videos (too large for git; link to external host instead)
+assets/*.mp4
+
+# Local demo / promo production workspace
+demo/
+
+# Manual E2E smoke tests — require live API keys (OpenRouter / yfinance),
+# would break CI if committed. Kept local; run explicitly when validating
+# a release.
+agent/tests/e2e_*.py
+agent/tests/test_e2e_*.py
+
+# Local working notes
+NOTES.md
+
+# Agent tool aliases (auto-generated mirror of CLAUDE.md)
+AGENTS.md
+
+.DS_Store
+
+# Alpha Zoo wiki artifacts (generated, not source)
+wiki/alpha-library/manifest.json
+wiki/alpha-library/content/
+
+# Pytest cache files
+pytest-cache-files-*
+
+# Local app data caches
+data_cache/
+agent/secrets/
+agent/runs/_tmp_youtube_probe/
+
+# Cloudflare Quick Tunnel runtime output (temporary public URL — never commit)
+.runtime/
+
+# Public release: private configuration and local artifacts
+**/node_modules/
+**/.npm-cache/
+**/.pip-cache/
+**/.pytest*/
+**/.swarm/
+**/secrets/
+**/.env*
+!**/.env.example
+**/agent.json
+**/agent.yaml
+**/agent.yml
+**/mcp.json
+**/mcp.yaml
+**/mcp.yml
+**/*cookies*
+*.pem
+*.key
+*.pfx
+*.sqlite*
+*.db
+*.duckdb
+*.parquet
+*.tgz
+*.tar
+*.tar.gz
+*.log
+**/HANDOFF.md
+**/MAINTENANCE_LOG*.md
+daily_stock_analysis/data/
+paper/
+agent/data/manual_earnings_dates.json
+agent/data/peer_earnings_calendar_overrides.json
+
+# Local research reports
+wiki/*_ZH.md
+wiki/*_AUDIT_*.md

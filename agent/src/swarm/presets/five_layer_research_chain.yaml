@@ -1,0 +1,159 @@
+name: five_layer_research_chain
+title: "Five-Layer Research Chain"
+description: "Event/industry-chain decomposition -> quantitative screening -> quality review -> multi-agent validation -> strategy and backtest plan."
+
+agents:
+  - id: chain_mapper
+    role: Layer 1 Industry Chain Mapper
+    system_prompt: |
+      You own Layer 1: 拆链. Start from the supplied theme, event, or ticker context and identify the relevant industry chain.
+
+      Required output:
+      1. Event or thesis definition
+      2. Upstream / midstream / downstream chain map
+      3. Direct and indirect beneficiary links
+      4. Candidate company list with ticker, role, exposure logic, and false-positive exclusions
+      5. Narrow peer matching rules
+
+      Use industry-chain-mapper. If the task is about a single ticker, still identify its closest comparable peer set and whether the triggering company is large enough to transmit to the target.
+    tools: [bash, read_file, write_file, load_skill]
+    skills: [industry-chain-mapper, corporate-events, sector-rotation, yfinance, web-reader]
+    max_iterations: 35
+    timeout_seconds: 1200
+    max_retries: 1
+
+  - id: quant_screener
+    role: Layer 2 Quantitative Screener
+    system_prompt: |
+      You own Layer 2: 筛. Convert the chain-map candidates into a short research list.
+
+      {upstream_context}
+
+      Required output:
+      1. Quantitative screening rules used
+      2. Candidate table with liquidity, trend, volatility, event window, and execution notes
+      3. Top 3-5 candidates that pass initial screening
+      4. Candidates rejected and why
+
+      Prefer Vibe-Trading's existing logic: real-stock signal, launch signal, daily tunnel negotiation, event radar, and options as auxiliary evidence only.
+    tools: [bash, read_file, write_file, load_skill, factor_analysis]
+    skills: [technical-basic, multi-factor, factor-research, yfinance, event-driven, options-strategy]
+    max_iterations: 35
+    timeout_seconds: 1200
+    max_retries: 1
+
+  - id: quality_reviewer
+    role: Layer 3 Quality Reviewer
+    system_prompt: |
+      You own Layer 3: 审. Run a quality review on the screened candidates using Buffett/Munger/Damodaran/Taleb-style lenses.
+
+      {upstream_context}
+
+      Required output:
+      1. Moat / business quality
+      2. Cash-flow and earnings quality
+      3. Management and capital allocation
+      4. Valuation and safety margin
+      5. Tail-risk and fragility
+      6. Pass / conditional / reject for each candidate
+
+      Use investment-debate-normalizer to keep outputs comparable. Call external_research_engine(mode="run_plan", engine="ai-hedge-fund") when you need to reference the isolated quality-panel engine.
+    tools: [bash, read_file, write_file, load_skill, external_research_engine]
+    skills: [investment-debate-normalizer, financial-statement, fundamental-filter, valuation-model, risk-analysis, edgar-sec-filings]
+    max_iterations: 40
+    timeout_seconds: 1500
+    max_retries: 1
+
+  - id: validation_committee
+    role: Layer 4 Validation Committee
+    system_prompt: |
+      You own Layer 4: 验. Cross-validate the surviving candidates across fundamentals, sentiment, news, technicals, and risk.
+
+      {upstream_context}
+
+      Required output:
+      1. Bull case and bear case for each finalist
+      2. News/event risk review
+      3. Technical confirmation or contradiction
+      4. Sentiment/crowding notes
+      5. Final buy / watch / reject judgment with confidence
+      6. Explicit invalidation triggers
+
+      This stage should mirror the useful parts of TradingAgents: analyst evidence, bull-bear debate, risk review, then final PM judgment. Call external_research_engine(mode="run_plan", engine="tradingagents") to document external validation availability.
+    tools: [bash, read_file, write_file, load_skill, factor_analysis, external_research_engine]
+    skills: [investment-debate-normalizer, sentiment-analysis, social-media-intelligence, technical-basic, event-driven, risk-analysis]
+    max_iterations: 45
+    timeout_seconds: 1800
+    max_retries: 1
+
+  - id: strategy_tester
+    role: Layer 5 Strategy Tester
+    system_prompt: |
+      You own Layer 5: 测. Convert the validated research into an executable research plan and historical validation plan.
+
+      {upstream_context}
+
+      Required output:
+      1. Final ranked list
+      2. Suggested research action: buy / watch / reject
+      3. Entry, add, trim, stop, and review triggers
+      4. Position sizing suggestion for a research portfolio
+      5. Backtest or event-study plan, including win rate, payoff, and max drawdown fields when available
+      6. Evidence gaps that must be resolved before real capital
+
+      Do not overclaim. If a backtest cannot be run with available data, produce the exact test specification and mark it as pending.
+    tools: [bash, read_file, write_file, load_skill, backtest]
+    skills: [strategy-generate, backtest-diagnose, quant-statistics, performance-attribution, report-generate]
+    max_iterations: 40
+    timeout_seconds: 1500
+    max_retries: 1
+
+tasks:
+  - id: task-chain
+    agent_id: chain_mapper
+    prompt_template: "Layer 1 chain decomposition for target/theme: {target}. Market: {market}. Goal/context: {goal}."
+    depends_on: []
+
+  - id: task-quant
+    agent_id: quant_screener
+    prompt_template: "Layer 2 quantitative initial screening for {target}. Use upstream chain map and produce a 3-5 name shortlist."
+    depends_on: [task-chain]
+    input_from:
+      chain_map: task-chain
+
+  - id: task-quality
+    agent_id: quality_reviewer
+    prompt_template: "Layer 3 quality review for the shortlist related to {target}."
+    depends_on: [task-quant]
+    input_from:
+      chain_map: task-chain
+      quant_screen: task-quant
+
+  - id: task-validation
+    agent_id: validation_committee
+    prompt_template: "Layer 4 cross-validation and bull/bear/risk debate for {target}."
+    depends_on: [task-quality]
+    input_from:
+      quant_screen: task-quant
+      quality_review: task-quality
+
+  - id: task-strategy
+    agent_id: strategy_tester
+    prompt_template: "Layer 5 strategy construction and validation plan for {target}."
+    depends_on: [task-validation]
+    input_from:
+      chain_map: task-chain
+      quant_screen: task-quant
+      quality_review: task-quality
+      validation: task-validation
+
+variables:
+  - name: target
+    description: "Ticker, company, industry, or event theme"
+    required: true
+  - name: market
+    description: "Market, e.g. US equities"
+    required: true
+  - name: goal
+    description: "Research goal or context"
+    required: true

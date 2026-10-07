@@ -1,0 +1,19 @@
+{
+  "source": "auto",
+  "codes": [
+    "AAPL.US",
+    "NVDA.US",
+    "MSFT.US",
+    "GOOGL.US",
+    "AMZN.US",
+    "META.US",
+    "TSLA.US"
+  ],
+  "start_date": "2026-03-01",
+  "end_date": "2026-05-27",
+  "interval": "1D",
+  "initial_cash": 100000.0,
+  "commission": 0.0005,
+  "engine": "daily",
+  "benchmark": "SPY"
+}
