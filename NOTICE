@@ -21,9 +21,8 @@ Prose, tables, and figures from the source papers and reports are NOT
 reproduced in this repository. Only the mathematical formulas — which are
 factual content and not subject to copyright — are reimplemented here.
 
-StockSignalForge integrates GilData MCP (Hundsun Juyuan) as an external,
-user-configured financial research data service.
-Service information: https://www.gildata.com/products/datamap
-No GilData credentials, service implementation, or licensed market datasets
-are distributed with this repository. Upstream Vibe-Trading attribution above
-is retained.
+StockSignalForge 接入恒生聚源（Glidata）MCP 金融研究数据服务。
+服务地址与凭据需自行配置，服务源码和授权数据不随仓库发布。
+服务信息：https://www.gildata.com/products/datamap
+
+项目框架基于 Vibe-Trading，上游版权与许可声明见上文。

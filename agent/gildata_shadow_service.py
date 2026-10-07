@@ -1,4 +1,4 @@
-"""Read-only GilData MCP shadow samples for US equity research data.
+"""Read-only 恒生聚源（Glidata）MCP shadow samples for US equity research data.
 
 Only an explicit batch probe calls MCP. Normal page reads consume the small,
 validated cache, and no shadow field feeds a historical calibration model.
