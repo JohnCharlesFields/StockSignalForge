@@ -1,4 +1,4 @@
-# StockSignalForge · 股讯工坊
+# 金融机构开发者 × 聚源数据地图 MCP：开源 AI 量化与投研系统。
 
 **基于恒生聚源（Glidata）MCP 打造的 AI 股票研究工作台。**
 
