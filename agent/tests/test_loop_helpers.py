@@ -28,7 +28,7 @@ from src.agent.loop import (
 
 class TestEstimateTokens:
     def test_empty(self) -> None:
-        assert estimate_tokens([]) == len("[]") // 4
+        assert estimate_tokens([]) >= 256
 
     def test_proportional(self) -> None:
         short = [{"role": "user", "content": "hi"}]
@@ -40,7 +40,7 @@ class TestEstimateTokens:
         msg = [{"role": "user", "content": "a" * 400}]
         tokens = estimate_tokens(msg)
         # Should be roughly 100 tokens for 400 chars of content (plus overhead)
-        assert 80 < tokens < 200
+        assert 330 < tokens < 450
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ class TestMicrocompact:
         for i in range(KEEP_RECENT + 5):
             messages.append({"role": "tool", "content": f"{'x' * 200} result_{i}", "tool_call_id": f"tc_{i}"})
 
-        _microcompact(messages)
+        _microcompact(messages, budget=100)
 
         tool_msgs = [m for m in messages if m.get("role") == "tool"]
         # Old ones should be [cleared]

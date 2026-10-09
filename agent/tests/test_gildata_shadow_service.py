@@ -83,6 +83,8 @@ def test_cached_vix_is_opt_in_exact_session_and_offline(monkeypatch) -> None:
             return json.dumps({"as_of": "2026-09-25", "value": 14.87})
 
     monkeypatch.setattr(service, "_root", CachedPath)
+    monkeypatch.delenv("GILDATA_VIX_FALLBACK", raising=False)
+    monkeypatch.delenv("GILDATA_REFERENCE_PRIMARY", raising=False)
     assert service.cached_vix("2026-09-25") is None
     monkeypatch.setenv("GILDATA_VIX_FALLBACK", "1")
     assert service.cached_vix("2026-09-25")["value"] == 14.87
@@ -154,6 +156,8 @@ def test_finquery_rejects_oversized_response(monkeypatch) -> None:
 def test_macro_vix_uses_shadow_only_after_primary_sources_fail(monkeypatch) -> None:
     import pandas as pd
 
+    monkeypatch.setenv("GILDATA_VIX_FALLBACK", "1")
+    monkeypatch.delenv("GILDATA_REFERENCE_PRIMARY", raising=False)
     monkeypatch.setattr(macro_panic_service, "_write_cache", lambda payload: None)
     monkeypatch.setattr(macro_panic_service, "get_cboe_vix_latest", lambda index: {"available": False})
     monkeypatch.setattr(macro_panic_service, "get_daily_history", lambda *args, **kwargs: (pd.DataFrame(), "empty"))
@@ -167,7 +171,10 @@ def test_macro_vix_uses_shadow_only_after_primary_sources_fail(monkeypatch) -> N
     assert result["data_as_of_date"]
 
 
-@pytest.mark.parametrize("url", ["", "http://mcp.example.invalid/finance"])
+@pytest.mark.parametrize("url", ["", "http://mcp.example.invalid/finance",
+    "https://mcp.example.invalid/finance?token=private-test-token",
+    "https://user:private-test-token@mcp.example.invalid/finance",
+    "https://mcp.example.invalid/finance#private-config"])
 def test_finquery_requires_private_https_endpoint_before_network(monkeypatch, url) -> None:
     monkeypatch.setenv("GILDATA_MCP_TOKEN", "private-test-token")
     monkeypatch.setenv("GILDATA_MCP_URL", url)

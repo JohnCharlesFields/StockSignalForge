@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { authHeaders } from "@/lib/apiAuth";
 import { cn } from "@/lib/utils";
 import { CandlestickChart } from "@/components/charts/CandlestickChart";
+import { GildataEvidencePanel, type GildataEvidence } from "@/components/GildataEvidence";
 import { api, type DistributionRisk, type EarningsInfo, type PriceBar, type TradeMarker, type NewsDigest } from "@/lib/api";
 
 type AnyRecord = Record<string, any>;
@@ -158,6 +159,9 @@ interface CompanyProfile {
     pe?: number | null;
     pb?: number | null;
     ps?: number | null;
+    daily_quote?: { close?: number; as_of?: string; is_realtime?: boolean; adjustment?: string } | null;
+    annual_eps_estimates?: { report_period: string; mean: number; count?: number; window_days?: number }[];
+    evidence?: GildataEvidence;
   } | null;
   facts?: {
     name?: string | null;
@@ -199,6 +203,7 @@ interface CompanyProfile {
   ai_available?: boolean;
   ai_note?: string;
   business_cn?: string;
+  vendor_business_cn?: string;
   segment_cn?: string;
   products?: string[];
   upstream_suppliers?: string[];
@@ -1521,7 +1526,27 @@ function CompanyProfileCard({ profile, symbol }: { profile?: CompanyProfile; sym
       )}
 
       <div className="mt-2 divide-y divide-border/60">
-        {profile?.business_cn && <ProfileRow label="主营业务">{profile.business_cn}</ProfileRow>}
+        {gil?.annual_eps_estimates && gil.annual_eps_estimates.length > 0 && !gil.evidence?.forecast?.estimates?.length && (
+          <ProfileRow label="年度EPS预期">
+            <div className="space-y-1 text-sm">
+              {gil.annual_eps_estimates.slice(0, 3).map((estimate) => (
+                <div key={estimate.report_period}>
+                  年度截至 {estimate.report_period} · {fmtMoney(estimate.mean)} / 股 · {estimate.count ?? "--"} 份预测
+                </div>
+              ))}
+              <div className="text-xs text-muted-foreground">聚源 · 数据 {gil.as_of} · 年度一致预期，不是下一季度财报预期{gilRecent ? "" : " · 数据可能过期"}</div>
+            </div>
+          </ProfileRow>
+        )}
+        {gil?.daily_quote && (
+          <ProfileRow label="日收盘参考">
+            <span className="text-sm">{fmtMoney(gil.daily_quote.close)} · 聚源 {gil.daily_quote.as_of} · 非盘中实时价；复权口径未提供，不用于历史回测补洞</span>
+          </ProfileRow>
+        )}
+        {(profile?.vendor_business_cn || profile?.business_cn) && <ProfileRow label="主营业务">
+          {profile.vendor_business_cn || profile.business_cn}
+          {profile.vendor_business_cn && <p className="mt-1 text-xs text-muted-foreground">聚源公司资料 · 更新时间未提供</p>}
+        </ProfileRow>}
         {profile?.products && profile.products.length > 0 && (
           <ProfileRow label="主要产品"><TagList items={profile.products} /></ProfileRow>
         )}
@@ -1541,6 +1566,7 @@ function CompanyProfileCard({ profile, symbol }: { profile?: CompanyProfile; sym
         )}
       </div>
 
+      <GildataEvidencePanel evidence={gil?.evidence} marketDate={profile?.market_session} />
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
         <span>{profile?.ai_note}</span>
         {f?.website && (

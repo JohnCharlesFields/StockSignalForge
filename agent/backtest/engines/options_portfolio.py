@@ -585,7 +585,7 @@ def _calc_options_metrics(
         Metrics dictionary.
     """
     n = len(equity)
-    if n < 2:
+    if n == 0:
         return {
             "final_value": initial_cash, "total_return": 0, "annual_return": 0,
             "max_drawdown": 0, "sharpe": 0, "calmar": 0, "sortino": 0,
@@ -594,20 +594,20 @@ def _calc_options_metrics(
 
     equity_vals = equity.astype(float)
     returns = equity_vals.pct_change().fillna(0.0)
+    returns.iloc[0] = float(equity_vals.iloc[0] / initial_cash - 1)
 
     total_ret = float(equity_vals.iloc[-1] / initial_cash - 1)
     ann_ret = float((1 + total_ret) ** (bars_per_year / max(n, 1)) - 1)
 
-    vol = float(returns.std())
+    vol = float(returns.std()) if n > 1 else 0.0
     sharpe = float(returns.mean() / (vol + 1e-10) * np.sqrt(bars_per_year))
 
-    peak = equity_vals.cummax()
+    peak = equity_vals.cummax().clip(lower=initial_cash)
     dd = (equity_vals - peak) / peak.replace(0, 1)
     max_dd = float(dd.min())
     calmar = ann_ret / abs(max_dd) if abs(max_dd) > 1e-10 else 0.0
 
-    downside = returns[returns < 0]
-    downside_std = float(downside.std()) if len(downside) > 1 else 1e-10
+    downside_std = float(np.sqrt(np.mean(np.minimum(returns.to_numpy(), 0.0) ** 2)))
     sortino = float(returns.mean() / (downside_std + 1e-10) * np.sqrt(bars_per_year))
 
     # Trade statistics
@@ -616,8 +616,9 @@ def _calc_options_metrics(
     losses = [p for p in closed_pnl if p < 0]
     win_rate = len(wins) / len(closed_pnl) if closed_pnl else 0.0
     avg_win = np.mean(wins) if wins else 0.0
-    avg_loss = abs(np.mean(losses)) if losses else 1e-10
-    pl_ratio = avg_win / avg_loss if avg_loss > 1e-10 else 0.0
+    avg_loss = abs(np.mean(losses)) if losses else 0.0
+    pl_ratio = avg_win / avg_loss if avg_loss > 0 else None
+    profit_factor = sum(wins) / abs(sum(losses)) if losses else None
 
     return {
         "final_value": round(float(equity_vals.iloc[-1]), 2),
@@ -629,5 +630,6 @@ def _calc_options_metrics(
         "sortino": round(sortino, 4),
         "trade_count": len(trades),
         "win_rate": round(win_rate, 4),
-        "profit_loss_ratio": round(pl_ratio, 4),
+        "profit_loss_ratio": round(pl_ratio, 4) if pl_ratio is not None else None,
+        "profit_factor": round(profit_factor, 4) if profit_factor is not None else (None if closed_pnl else 0.0),
     }

@@ -41,14 +41,15 @@ from app_database import (
     signal_calibration_list,
 )
 
-_SCORECARD_CACHE_KEY = "prediction_scorecard:v2"
+_SCORECARD_CACHE_KEY = "prediction_scorecard:v3"
 
 
 def _bust_scorecard_cache() -> None:
     """Expire every scorecard cache combo (scope x mode) after a write."""
     for scope in ("board", "all"):
         for mode in ("live", "backfill", "any"):
-            cache_set(f"{_SCORECARD_CACHE_KEY}:{scope}:{mode}", {}, ttl_seconds=1)
+            for version in ("legacy", "recorded_open_v3"):
+                cache_set(f"{_SCORECARD_CACHE_KEY}:{scope}:{mode}:{version}", {}, ttl_seconds=1)
 
 
 def _finite(v: Any, d: float = 0.0) -> float:
@@ -182,6 +183,7 @@ def _fallback_board_from_latest_snapshot(limit: int = 1000) -> Dict[str, Any]:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "snapshot_id": snapshot.get("snapshot_id"),
+        "data_as_of": (snapshot.get("payload") or {}).get("data_as_of"),
         "horizon_days": 10,
         "signal_basis": "pullback_hv_snapshot",
         "picks": picks,
@@ -223,14 +225,27 @@ def log_predictions(
         from market_calendar import most_recent_session
         as_of_date = most_recent_session().isoformat()
     as_of = str(as_of_date)
+    from market_calendar import is_trading_day, most_recent_session
+    if not is_trading_day(date.fromisoformat(as_of)) or as_of != most_recent_session().isoformat():
+        raise ValueError("forecast date must be the latest completed US session")
+    if board.get("data_as_of") != as_of:
+        raise ValueError("board price date must match forecast date")
     rows = []
+    skipped_dates = 0
     for i, p in enumerate(picks):
+        if p.get("price_as_of") != as_of:
+            skipped_dates += 1
+            continue
         rank = i + 1
         rows.append({
             "as_of_date": as_of, "symbol": p.get("symbol"), "rank": rank,
             "signal_type": "pullback_hv", "calibrated_prob": p.get("calibrated_probability"),
             "entry_ref_price": p.get("current_price"), "horizon_days": horizon,
             "curve_source": curve_source, "is_board_pick": rank <= int(top_n or 0),
+            "evaluation_version": "recorded_open_v3",
+            "forecast": {"snapshot_id": board.get("snapshot_id"), "price_as_of": p.get("price_as_of") or board.get("data_as_of"),
+                         "model_version": board.get("parameter_version", "legacy_ranking"), "features": p,
+                         "probability_target": "legacy_close_to_open_own_baseline"},
             **_playbook_prediction_fields(p),
         })
         p["candidate_rank"] = rank
@@ -238,7 +253,7 @@ def log_predictions(
     written = predictions_log_many(rows)
     slice_written = priority_candidate_slices_log(
         as_of_date=as_of,
-        rows=picks,
+        rows=[p for p in picks if p.get("price_as_of") == as_of],
         horizon_days=horizon,
         signal_type="pullback_hv",
         board_top_n=top_n,
@@ -249,6 +264,7 @@ def log_predictions(
         "logged_new": written,
         "slice_rows_written": slice_written,
         "candidates": len(rows),
+        "skipped_unverified_price_dates": skipped_dates,
         "board_top_n": int(top_n or 0),
         "horizon_days": horizon,
         "scope": "all_candidates" if log_all_candidates else "board_top_n",
@@ -470,7 +486,7 @@ def _beta_to_market(stock_close: pd.Series, spy_close: pd.Series, as_of_ts: pd.T
         if len(df) < 20:
             return 1.0
         sr, mr = df.iloc[:, 0], df.iloc[:, 1]
-        var = float(mr.var())
+        var = float(mr.var(ddof=0))
         if var <= 0:
             return 1.0
         beta = float(((sr - sr.mean()) * (mr - mr.mean())).mean() / var)
@@ -489,6 +505,7 @@ def resolve_predictions(limit: int = 4000) -> Dict[str, Any]:
     today = date.today()
     rt_cost = cost_model.equity_round_trip_cost()
     resolved = immature = skipped = 0
+    spy_frame = pd.DataFrame()
     try:
         spy_frame, _spy_src = get_daily_history("SPY", period="2y")
         spy_close = pd.to_numeric(spy_frame["Close"], errors="coerce").dropna()
@@ -527,13 +544,22 @@ def resolve_predictions(limit: int = 4000) -> Dict[str, Any]:
         open_ = exit_model.aligned_open(frame, close)
         index = close.index
         # Cache each (as_of, horizon) baseline once per symbol.
-        baseline_cache: Dict[int, float] = {}
+        baseline_cache: Dict[Any, float] = {}
         for p in rows:
             horizon = p["_horizon"]
             if len(close) <= horizon:
                 skipped += 1
                 continue
             as_of_ts = pd.Timestamp(p["_as_of"])
+            if p.get("evaluation_version") == "recorded_open_v3":
+                from pullback_validation import resolve_recorded_forecast
+                outcome = resolve_recorded_forecast(p, frame, spy_frame)
+                if outcome is None:
+                    immature += 1
+                    continue
+                prediction_resolve(p["prediction_id"], **outcome)
+                resolved += 1
+                continue
             entry_pos = [pos for pos, ts in enumerate(index) if ts >= as_of_ts]
             if not entry_pos:
                 skipped += 1
@@ -550,9 +576,11 @@ def resolve_predictions(limit: int = 4000) -> Dict[str, Any]:
                 skipped += 1
                 continue
             exit_ = entry * (1.0 + fwd)  # realized exit (open[T+H] in default mode)
-            if horizon not in baseline_cache:
-                baseline_cache[horizon] = _baseline_forward(close, horizon, open_)
-            baseline = baseline_cache[horizon]
+            baseline_key = (as_of_ts, horizon)
+            if baseline_key not in baseline_cache:
+                historical = close.loc[:as_of_ts]
+                baseline_cache[baseline_key] = _baseline_forward(historical, open_.reindex(historical.index) if open_ is not None else None, horizon)
+            baseline = baseline_cache[baseline_key]
             excess = fwd - baseline
             net_excess = excess - rt_cost
             # Beta-adjusted alpha: forward return minus beta x SPY forward (net of
@@ -624,7 +652,7 @@ def _bucket_stats(label: str, rows: List[Dict[str, Any]]) -> Dict[str, Any] | No
 
 
 def prediction_scorecard(force: bool = False, board_only: bool = False,
-                         mode: Optional[str] = "live") -> Dict[str, Any]:
+                         mode: Optional[str] = "live", evaluation_version: str = "legacy") -> Dict[str, Any]:
     """Live forward track record: predicted vs realized + proper scoring.
 
     ``mode`` selects which predictions count: 'live' (real walk-forward, the
@@ -632,28 +660,32 @@ def prediction_scorecard(force: bool = False, board_only: bool = False,
     ledger), or None (both). Live and backfill are kept apart so the seeded
     in-sample replay never inflates the live forward stats.
     """
-    cache_key = f"{_SCORECARD_CACHE_KEY}:{'board' if board_only else 'all'}:{mode or 'any'}"
+    cache_key = f"{_SCORECARD_CACHE_KEY}:{'board' if board_only else 'all'}:{mode or 'any'}:{evaluation_version}"
     if not force:
         cached = cache_get(cache_key)
         if isinstance(cached, dict) and cached.get("available") is not None:
             return {**cached, "cache_hit": True}
 
-    counts = predictions_count(mode=mode)
+    counts = predictions_count(mode=mode, evaluation_version=evaluation_version)
     resolved = predictions_resolved(board_only=board_only, mode=mode)
+    resolved = [r for r in resolved if r.get("evaluation_version", "legacy") == evaluation_version]
     result: Dict[str, Any] = {
         "available": bool(resolved), "counts": counts, "cache_hit": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": mode or "any",
+        "evaluation_version": evaluation_version,
+        "evaluation_note": "历史结算口径待审计" if evaluation_version == "legacy" else "记录后下一可交易开盘入场；事前基线。旧校准概率仅供参考，与新收益目标尚未校准。",
         "scope": "board_top_n" if board_only else "all_candidates",
         "calibration_audit": _calibration_audit(),
         "method_note": (
             "实盘前向对账：每天看板推荐在出结果前落账(无 look-ahead)，到期(N交易日)才结算。"
             "胜=扣成本后跑赢该股自身基线。单位是 N 日超额，1 天涨跌只是临时盯市不作数。"
-            "edge 小(~1%/10日)，需数百笔样本 CI 才会收窄——样本不够时如实标'尚未显著'，勿因几日红绿改模型。"
+            "历史口径与记录后开盘口径分组统计；首次预测已冻结。重叠持有需要更多交易日验证，不能按记录笔数估算独立样本数。"
         ),
     }
 
     if resolved:
+        from pullback_validation import block_interval
         n = len(resolved)
         preds = [_finite(r["calibrated_prob"]) for r in resolved]
         wins = [int(r["win"]) for r in resolved]
@@ -681,7 +713,8 @@ def prediction_scorecard(force: bool = False, board_only: bool = False,
                 "win_rate": round(mean([1 if b > 0 else 0 for b in betas]), 4),
                 "ci": [ba_lo, ba_hi],
                 "significant": bool(ba_lo is not None and ba_lo > 0),
-                "note": "beta 调整后的净 alpha：剥离大盘(forward − beta×SPY forward)、扣成本。CI 排除0 = 有市场中性的真 edge。",
+                "evidence_direction": "negative" if ba_hi is not None and ba_hi < 0 else "positive" if ba_lo is not None and ba_lo > 0 else "inconclusive",
+                "note": "扣成本后的SPY beta调整收益；仍可能包含行业、风格风险。单日聚类区间未完全处理跨日重叠，需分块验证。",
             }
         brier = mean([(p - w) ** 2 for p, w in zip(preds, wins)])
         base = realized_hit
@@ -742,7 +775,14 @@ def prediction_scorecard(force: bool = False, board_only: bool = False,
             "realized_win_rate": round(realized_hit, 4),
             "mean_net_excess": round(mean(nets), 6),
             "net_excess_ci": [ci_lo, ci_hi],
+            "overlap_adjusted_ci": block_interval(by_day_excess, max(r["horizon_days"] for r in resolved)),
+            "mean_net_return": mean([r["net_return"] if r.get("net_return") is not None else r["forward_return"] - (r["excess_return"] - r["net_excess"]) for r in resolved]),
             "significant": bool(ci_lo is not None and ci_lo > 0),
+            "evidence_direction": "negative" if ci_hi is not None and ci_hi < 0 else "positive" if ci_lo is not None and ci_lo > 0 else "inconclusive",
+            "evaluation_cohorts": [dict(version=v, **(_bucket_stats(v, [r for r in resolved if r.get("evaluation_version", "legacy") == v]) or {}))
+                                   for v in sorted({r.get("evaluation_version", "legacy") for r in resolved})],
+            "horizon_cohorts": [dict(horizon_days=h, **(_bucket_stats(str(h), [r for r in resolved if r["horizon_days"] == h]) or {}))
+                                for h in sorted({r["horizon_days"] for r in resolved})],
             "brier": round(brier, 4), "brier_skill_score": round(skill, 4) if skill is not None else None,
             "reliability_buckets": buckets,
             "rank_buckets": rank_buckets,
@@ -753,11 +793,13 @@ def prediction_scorecard(force: bool = False, board_only: bool = False,
                 "样本不足或标签为空时，不应据此判定有效。"
             ),
         })
+        if evaluation_version == "recorded_open_v3":
+            result.update(predicted_win_rate=None, brier=None, brier_skill_score=None, reliability_buckets=[])
 
     # Provisional mark-to-market on open board picks (monitoring only).
     try:
         from market_data_service import get_daily_history
-        open_rows = predictions_open(board_only=board_only, mode=mode)
+        open_rows = predictions_open(board_only=board_only, mode=mode, evaluation_version=evaluation_version)
         mtm_vals = []
         for r in open_rows[:80]:
             try:

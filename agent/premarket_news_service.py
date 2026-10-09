@@ -382,6 +382,8 @@ def _subject_symbols(article: dict[str, Any]) -> set[str]:
     mention (fixes Apple-story-tagged-GOOG from both Polygon insights and the
     per-ticker Yahoo stream).
     """
+    if article.get("data_source") == "gildata:news":
+        return set(article.get("tickers") or [])  # Headline-validated by the adapter.
     ins = _insight_symbols(article)
     base = ins if ins else _article_symbols(article)
     return _filter_subject_noise(str(article.get("title") or ""), base)
@@ -709,7 +711,7 @@ def _fetch_massive_news(start_utc: str, end_utc: str, max_pages: int = 3) -> tup
 # to be -> higher weight sorts higher in the queue. HEURISTIC (keyword + source
 # + recency), not a model.
 _MACRO_RULES: tuple[tuple[str, str, int, tuple[str, ...]], ...] = (
-    ("fed_rates", "美联储/利率", 88, ("federal reserve", "interest rate", "rate hike", "rate cut", "fomc", "jerome powell", "monetary policy", "basis point", "rate decision")),
+    ("fed_rates", "美联储/利率", 88, ("federal reserve", "interest rate", "rate hike", "rate cut", "fomc", "jerome powell", "monetary policy", "basis point", "rate decision", "美联储", "利率决议")),
     ("war_geo", "地缘冲突/战争", 84, ("russia", "ukraine", "invasion", "missile strike", "israel", "iran", "gaza", "geopolitic", "military strike", "ceasefire", "war escalat")),
     ("tariff_trade", "关税/贸易战", 80, ("tariff", "trade war", "export ban", "import ban", "sanction", "trade deal")),
     ("market_move", "大盘剧震", 78, ("stocks tumble", "stocks slump", "stocks slide", "stocks rally", "stocks plunge", "stocks fall", "market selloff", "market sell-off", "sell-off deepens", "circuit breaker", "market crash", "futures slump", "futures jump", "futures tumble", "nasdaq drop", "nasdaq tumble", "nasdaq slide", "nasdaq jump", "dow drop", "dow jump", "dow tumble", "dow plunge", "s&p 500 drop", "s&p 500 slide", "s&p 500 jump", "s&p 500 rally", "s&p 500 plunge", "s&p 500 fall")),
@@ -784,7 +786,7 @@ def _build_market_item(article: dict[str, Any], mi: dict[str, Any]) -> dict[str,
         "publisher": _publisher_name(article),
         "article_url": url,
         "published_utc": published,
-        "source": "massive:news",
+        "source": article.get("data_source") or "massive:news",
         "sentiment": sentiment,
         "sentiment_score": mi.get("sentiment_score") or 0.0,
         "sentiment_reasoning": mi.get("reasoning") or "",
@@ -804,7 +806,7 @@ def _build_market_item(article: dict[str, Any], mi: dict[str, Any]) -> dict[str,
         "related_symbols": list(_MARKET_ETFS),
         "alternatives": [{"symbol": etf, "reason": "大盘 ETF（观察市场方向）",
                           "action_hint": "用作大盘风向标，不代表个股。"} for etf in _MARKET_ETFS],
-        "raw": {},
+        "raw": {"gildata_provenance": article.get("gildata_provenance")},
     }
 
 
@@ -831,13 +833,14 @@ def _yahoo_to_article(it: dict[str, Any], symbol: str) -> dict[str, Any]:
         "amp_url": url,
         "published_utc": pub_date,
         "publisher": {"name": pub},
+        "data_source": "yahoo:news",
         "tickers": related,
         "insights": [],
         "keywords": [],
     }
 
 
-def _fetch_yahoo_news(symbols: list[str], cap_symbols: int = 25) -> list[dict[str, Any]]:
+def _fetch_yahoo_news(symbols: list[str], cap_symbols: int = 25, audit: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Second news source (yfinance/Yahoo) for publisher diversity -- it carries
     Bloomberg / IBD / general media that the Massive feed lacks. Per-symbol, so we
     cap the symbol count and fetch concurrently; failures are tolerated."""
@@ -850,7 +853,9 @@ def _fetch_yahoo_news(symbols: list[str], cap_symbols: int = 25) -> list[dict[st
             import yfinance as yf
             raw = yf.Ticker(sym).news or []
             return [_yahoo_to_article(it, sym) for it in raw]
-        except Exception:
+        except Exception as exc:
+            if audit is not None:
+                audit.setdefault("failures", []).append({"symbol": sym, "error_type": type(exc).__name__})
             return []
 
     out: list[dict[str, Any]] = []
@@ -926,7 +931,7 @@ def _build_item(
         "publisher": publisher,
         "article_url": url,
         "published_utc": published,
-        "source": "massive:news",
+        "source": article.get("data_source") or "massive:news",
         "sentiment": sentiment,
         "sentiment_score": sentiment_score,
         "sentiment_reasoning": reasoning,
@@ -946,6 +951,7 @@ def _build_item(
         "related_symbols": related,
         "alternatives": alternatives,
         "raw": {
+            "gildata_provenance": article.get("gildata_provenance"),
             "keywords": article.get("keywords") or [],
             "amp_url": article.get("amp_url"),
             "image_url": article.get("image_url"),
@@ -984,7 +990,9 @@ def _store_items(items: list[dict[str, Any]]) -> int:
                         THEN excluded.translation_status ELSE premarket_news_items.translation_status END,
                     publisher = excluded.publisher,
                     article_url = excluded.article_url,
-                    published_utc = excluded.published_utc,
+                    published_utc = CASE WHEN excluded.source = 'gildata:news'
+                        THEN premarket_news_items.published_utc ELSE excluded.published_utc END,
+                    source = excluded.source,
                     sentiment = excluded.sentiment,
                     sentiment_score = excluded.sentiment_score,
                     sentiment_reasoning = excluded.sentiment_reasoning,
@@ -1005,6 +1013,7 @@ def _store_items(items: list[dict[str, Any]]) -> int:
                     alternatives_json = excluded.alternatives_json,
                     raw_json = excluded.raw_json,
                     updated_at = excluded.updated_at
+                WHERE excluded.source != 'gildata:news' OR premarket_news_items.source = 'gildata:news'
                 """,
                 (
                     item["news_id"],
@@ -1099,12 +1108,42 @@ def refresh_premarket_news(
         _ingest(article)
     # Publish the first source before a slower provider or LLM can stall.
     _store_items(list(seen.values()) + [item for _, item in macro.values()])
+    # Supplemental Chinese snippets are stored before slower fallback sources.
+    # They keep provenance, never fabricate original URLs or model win rates.
+    try:
+        from gildata_shadow_service import fetch_news_supplement
+
+        def _publish_supplement(articles):
+            for article in articles:
+                if article.get("is_market_reference"):
+                    mi = _market_impact(article)
+                    if not mi.get("is_macro"):
+                        mi = {"score": next(r[2] for r in EVENT_RULES if r[0] == "macro_policy"),
+                              "category": "fed_rates", "category_cn": "美联储资讯参考", "sentiment": "neutral"}
+                    item = _build_market_item(article, mi)
+                else:
+                    matched = _subject_symbols(article) & symbols
+                    if not matched:
+                        continue
+                    item = _build_item(article, sorted(matched)[0], universe_ids, universe_labels, enrich_metadata=False)
+                item.update(title_cn=article["title"], description_cn=article["description"],
+                            translation_status="vendor_cn", estimated_gap_pct=None, impact_band_pct=None,
+                            sentiment="unreviewed", sentiment_score=0.0,
+                            sentiment_reasoning="聚源资讯片段尚未进行方向复核，不据关键词判断多空。")
+                seen.setdefault(item["news_id"], item)
+            _store_items(list(seen.values()))
+
+        _, source_audit["gildata"] = fetch_news_supplement(sorted(symbols), start_utc, end_utc, publish=_publish_supplement)
+    except Exception as exc:
+        source_audit["gildata"] = {"status": "unavailable", "error_type": type(exc).__name__}
     # Second source: Yahoo (publisher diversity -> authoritative/general media that
     # Massive's Motley-Fool/PR feed lacks). Fetch for the most newsworthy names in
     # play PLUS broad ETFs (SPY/QQQ/DIA) to pull market-level macro (Fed/war/...).
     try:
         yahoo_syms = [s for s, _ in Counter(matched_syms).most_common(25)] or sorted(symbols)[:25]
-        yahoo_news = _fetch_yahoo_news(yahoo_syms + list(_MARKET_ETFS))
+        yahoo_audit: dict[str, Any] = {"failures": []}
+        yahoo_news = _fetch_yahoo_news(list(_MARKET_ETFS) + yahoo_syms, audit=yahoo_audit)
+        source_audit["yahoo"] = yahoo_audit
         source_audit["yahoo_raw_count"] = len(yahoo_news)
         for article in yahoo_news:
             _ingest(article)
@@ -1121,6 +1160,8 @@ def refresh_premarket_news(
     to_enrich = _apply_source_mix_cap(items, top_n) if top_n else []
     # Raw English remains stored for audit.
     for item in to_enrich:
+        if item.get("source") == "gildata:news":
+            continue
         is_mkt = str(item.get("symbol") or "").upper() == MARKET_SYMBOL
         enr = enrich_news_llm(
             item.get("title_original", ""),
@@ -1150,7 +1191,7 @@ def refresh_premarket_news(
     except Exception as exc:  # noqa: BLE001
         print(f"warm_news_embeddings skipped: {str(exc)[-120:]}", flush=True)
     return {
-        "status": "completed" if items else "unavailable",
+        "status": ("partial" if (source_audit.get("yahoo") or {}).get("failures") or (source_audit.get("gildata") or {}).get("errors") else "completed") if items else "unavailable",
         "generated_at": _utc_now(),
         "window": {"start_utc": start_utc, "end_utc": end_utc},
         "requested_universes": requested,
@@ -1208,6 +1249,8 @@ def _row_to_item(row: Any) -> dict[str, Any]:
     d["related_symbols"] = _json_load(d.pop("related_symbols_json", None), [])
     d["alternatives"] = _json_load(d.pop("alternatives_json", None), [])
     d["raw"] = _json_load(d.pop("raw_json", None), {})
+    if d.get("source") == "gildata:news":
+        d["source_provenance"] = d["raw"].get("gildata_provenance") or {}
     d["sector_effect"] = bool(d.get("sector_effect"))
     tier = _source_tier(d.get("publisher", ""), d.get("title_original", ""))
     d["source_tier"] = tier["tier"]
@@ -1379,7 +1422,15 @@ def _apply_source_mix_cap(items: list[dict[str, Any]], limit: int, max_low_ratio
     """Compose the displayed queue so 散户荐股 + 企业通稿 stay < `max_low_ratio` of
     it. Items must arrive sorted by score; we greedily admit low-tier rows only
     while the running ratio holds, so authoritative/general media dominate the top.
-    If quality items are scarce the list is simply shorter (honest, not padded)."""
+    If quality items are scarce the list is shorter. When none are available,
+    return the available commentary with its original source warnings instead
+    of incorrectly presenting a nonempty queue as no news."""
+    if items and all(
+        it.get("source_tier") in _LOW_TIERS
+        and str(it.get("symbol") or "").upper() != MARKET_SYMBOL
+        for it in items
+    ):
+        return items[:limit]
     out: list[dict[str, Any]] = []
     low = 0
     for it in items:
@@ -1687,11 +1738,17 @@ def list_premarket_news(
     # so they must not be counted in the retail-share metric for the stock list.
     stock_items = [it for it in items if str(it.get("symbol") or "").upper() != MARKET_SYMBOL]
     low_shown = sum(1 for it in stock_items if it.get("source_tier") in _LOW_TIERS)
+    source_mix_degraded = bool(apply_cap and items and low_shown == len(items))
     return {
         "items": items,
         "count": len(items) if apply_cap else int(count or 0),
         "total_unreviewed": int(count or 0),
         "low_tier_share": round(low_shown / len(stock_items), 3) if stock_items else 0.0,
+        "source_mix_degraded": source_mix_degraded,
+        "source_mix_warning": (
+            "当前队列仅有荐股观点或企业通稿，已降级展示；来源标签保留，请核对原文，不视为已核实事件。"
+            if source_mix_degraded else ""
+        ),
         "limit": int(limit),
         "offset": int(offset),
         "reviewed": reviewed,

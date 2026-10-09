@@ -20,5 +20,6 @@ __alpha_meta__ = {
 def compute(panel: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Return qlib158 CNTN20 on the supplied OHLCV panel."""
     c = panel['close']
-    dn = (c < c.shift(1)).astype('float64')
+    valid = c.notna() & c.shift(1).notna()
+    dn = (c < c.shift(1)).astype('float64').where(valid)
     return dn.rolling(window=20, min_periods=20).mean()

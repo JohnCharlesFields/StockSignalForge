@@ -13,7 +13,7 @@ def _bars(close: float) -> pd.DataFrame:
     )
 
 
-def test_download_daily_history_uses_bulk_yahoo_only_for_missing(monkeypatch) -> None:
+def test_download_daily_history_uses_raw_massive_only_for_missing(monkeypatch) -> None:
     import market_data_service as service
 
     monkeypatch.setattr(
@@ -23,13 +23,19 @@ def test_download_daily_history_uses_bulk_yahoo_only_for_missing(monkeypatch) ->
             (_bars(101.0), "twelvedata:incremental") if symbol == "AAPL" else (pd.DataFrame(), "cache:ohlcv")
         ),
     )
-    monkeypatch.setattr(service.yf, "download", lambda *args, **kwargs: pd.concat({"MSFT": _bars(202.0)}, axis=1))
+    calls = []
+    def massive(symbol, start, adjusted=False):
+        calls.append((symbol, adjusted))
+        return _bars(202.0)
+    monkeypatch.setattr(service, "_massive_aggs", massive)
+    monkeypatch.setattr(service.yf, "download", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy Yahoo bulk fallback must stay disabled")))
     monkeypatch.setattr(service, "_write_daily_cache", lambda *args, **kwargs: None)
 
     frame, sources = service.download_daily_history(["AAPL", "MSFT"])
 
     assert not frame.empty
-    assert sources == {"AAPL": "twelvedata:incremental", "MSFT": "yfinance:bulk-fallback"}
+    assert sources == {"AAPL": "twelvedata:incremental", "MSFT": "massive:bulk-fallback"}
+    assert calls == [("MSFT", False)]
 
 
 def test_external_data_scope_blocks_bulk_yahoo_for_missing(monkeypatch) -> None:
@@ -116,6 +122,8 @@ def test_short_fresh_cache_does_not_mask_longer_requested_history(monkeypatch) -
 
 def test_massive_option_snapshot_preserves_missing_activity_fields(monkeypatch) -> None:
     import market_data_service as service
+    # This tests missing activity, not expired-contract rejection.
+    expiry = (pd.Timestamp.now().normalize() + pd.Timedelta(days=60)).date().isoformat()
 
     monkeypatch.setattr(
         service,
@@ -126,7 +134,7 @@ def test_massive_option_snapshot_preserves_missing_activity_fields(monkeypatch) 
                     "details": {
                         "ticker": "O:TEST260717C00100000",
                         "contract_type": "call",
-                        "expiration_date": "2026-07-17",
+                        "expiration_date": expiry,
                         "strike_price": 100,
                     },
                     "implied_volatility": 0.5,
@@ -137,7 +145,7 @@ def test_massive_option_snapshot_preserves_missing_activity_fields(monkeypatch) 
                     "details": {
                         "ticker": "O:TEST260717P00100000",
                         "contract_type": "put",
-                        "expiration_date": "2026-07-17",
+                        "expiration_date": expiry,
                         "strike_price": 100,
                     },
                     "implied_volatility": 0.6,

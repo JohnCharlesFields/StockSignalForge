@@ -69,7 +69,7 @@ function NewsCard({
             )}
             <span className="text-sm text-muted-foreground">{item.company_name}</span>
             <span className={cn("rounded-full border px-2 py-0.5 text-xs", toneClass(item.sentiment))}>
-              {item.sentiment === "positive" ? "正面" : item.sentiment === "negative" ? "负面" : "中性"}
+              {item.sentiment === "unreviewed" ? "待研判" : item.sentiment === "positive" ? "正面" : item.sentiment === "negative" ? "负面" : "中性"}
             </span>
             {item.event_type_cn && <span className="rounded-full border px-2 py-0.5 text-xs text-muted-foreground">{item.event_type_cn}</span>}
             {item.sector_effect && (
@@ -84,8 +84,9 @@ function NewsCard({
             )}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            {item.publisher || "Unknown"} · {compactDate(item.published_utc)} · 来源 {item.source || "massive:news"}
+            {item.publisher || "Unknown"} · {item.source_provenance?.reported_time || compactDate(item.published_utc)} · 来源 {item.source || "massive:news"}
           </div>
+          {item.source_provenance?.note && <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{item.source_provenance.note}</p>}
           {poolHint && <div className="mt-1 text-xs text-muted-foreground">来源池：{poolHint}</div>}
           {priceMissing && (
             <div className="mt-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
@@ -137,7 +138,7 @@ function NewsCard({
           <h3 className="text-base font-semibold leading-6">{titleCn}</h3>
           {descCn && <p className="mt-2 text-sm leading-6 text-muted-foreground">{descCn}</p>}
           <details className="mt-3 rounded-md border bg-muted/20 p-3 text-xs">
-            <summary className="cursor-pointer text-muted-foreground">英文原文与出处</summary>
+            <summary className="cursor-pointer text-muted-foreground">{item.source === "gildata:news" ? "聚源资讯片段与出处" : "英文原文与出处"}</summary>
             <div className="mt-2 space-y-2">
               <p className="font-medium text-foreground">{item.title_original}</p>
               {item.description_original && <p className="leading-5 text-muted-foreground">{item.description_original}</p>}
@@ -219,6 +220,7 @@ export function PremarketNews() {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [sourceWarning, setSourceWarning] = useState("");
   const [refreshResult, setRefreshResult] = useState<PremarketNewsRefreshResponse | null>(null);
   const [minScore, setMinScore] = useState(0);
   const [recentDays, setRecentDays] = useState(7);
@@ -232,6 +234,7 @@ export function PremarketNews() {
     try {
       const res = await api.getPremarketNews({ reviewed, limit: 120, min_score: minScore, recent_days: recentDays });
       setItems(res.items || []);
+      setSourceWarning(res.source_mix_warning || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -348,6 +351,12 @@ export function PremarketNews() {
       </div>
 
       <main className="mx-auto max-w-7xl space-y-4 px-4 py-4">
+        {sourceWarning && (
+          <div role="status" className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{sourceWarning}</span>
+          </div>
+        )}
         <section className="grid gap-3 md:grid-cols-4">
           <div className="rounded-lg border bg-card p-3">
             <div className="text-xs text-muted-foreground">当前队列</div>
@@ -428,7 +437,7 @@ export function PremarketNews() {
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         {item.symbol === "MARKET" && <span className="rounded-full border border-purple-500/45 bg-purple-500/10 px-2 py-0.5 text-[11px] font-medium text-purple-700 dark:text-purple-300">全市场·大盘</span>}
                         <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", toneClass(item.sentiment))}>
-                          {item.sentiment === "positive" ? "正面" : item.sentiment === "negative" ? "负面" : "中性"}
+                          {item.sentiment === "unreviewed" ? "待研判" : item.sentiment === "positive" ? "正面" : item.sentiment === "negative" ? "负面" : "中性"}
                         </span>
                         {item.event_type_cn && <span className="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">{item.event_type_cn}</span>}
                         {item.sector_effect && <span className="rounded-full border border-sky-500/35 bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-700 dark:text-sky-300">板块扩散</span>}
@@ -436,6 +445,7 @@ export function PremarketNews() {
                         {item.source_tier_cn && (
                           <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", tierClass(item.source_tier_tone))} title="来源类型(启发式)：权威媒体/一般媒体/散户荐股/企业通稿——非内容真伪判断">{item.source_tier_cn}</span>
                         )}
+                        {item.source_provenance && <span className="text-[11px] text-amber-600 dark:text-amber-300">聚源摘要 · 原文未核验</span>}
                         {relatedTickers(item).length > 0 && (
                           <span className="rounded-full border border-primary/30 bg-primary/5 px-2 py-0.5 text-[11px] text-primary" title="同一新闻涉及的其它标的">相关 {relatedTickers(item).join(" · ")}</span>
                         )}
@@ -460,7 +470,7 @@ export function PremarketNews() {
                         </>
                       )}
                     </div>
-                    <div className="text-xs text-muted-foreground whitespace-nowrap">{compactDate(item.published_utc)}</div>
+                    <div className="text-xs text-muted-foreground">{item.source_provenance?.reported_time || compactDate(item.published_utc)}</div>
                     <div className="min-w-0">
                       <div className="truncate font-medium">{item.sector_name || poolHint || "--"}</div>
                       <div className="truncate text-xs text-muted-foreground">{item.publisher || "Unknown"}</div>

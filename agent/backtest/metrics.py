@@ -41,7 +41,7 @@ def calc_bars_per_year(interval: str = "1D", source: str = "tushare") -> int:
     return trading_days * bars_per_day
 
 
-def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, float]:
+def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, Any]:
     """Win rate and P&L statistics from completed trades.
 
     Args:
@@ -66,12 +66,12 @@ def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, float]:
     win_rate = len(wins) / len(trades)
 
     avg_win = float(np.mean(wins)) if wins else 0.0
-    avg_loss = abs(float(np.mean(losses))) if losses else 1e-10
-    profit_loss_ratio = avg_win / avg_loss if avg_loss > 1e-10 else 0.0
+    avg_loss = abs(float(np.mean(losses))) if losses else 0.0
+    profit_loss_ratio = avg_win / avg_loss if avg_loss > 0 else None
 
     gross_profit = sum(wins) if wins else 0.0
-    gross_loss = abs(sum(losses)) if losses else 1e-10
-    profit_factor = gross_profit / gross_loss if gross_loss > 1e-10 else 0.0
+    gross_loss = abs(sum(losses)) if losses else 0.0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
 
     max_consec = 0
     cur_consec = 0
@@ -87,10 +87,10 @@ def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, float]:
 
     return {
         "win_rate": win_rate,
-        "profit_loss_ratio": round(profit_loss_ratio, 4),
+        "profit_loss_ratio": round(profit_loss_ratio, 4) if profit_loss_ratio is not None else None,
         "max_consecutive_loss": max_consec,
         "avg_holding_bars": round(avg_holding, 1),
-        "profit_factor": round(profit_factor, 4),
+        "profit_factor": round(profit_factor, 4) if profit_factor is not None else None,
     }
 
 
@@ -165,6 +165,12 @@ def calc_metrics(
     """
     if len(equity_curve) == 0:
         return _empty_metrics(initial_cash)
+    if not np.isfinite(initial_cash) or initial_cash <= 0:
+        raise ValueError("initial_cash must be finite and positive")
+    if not np.isfinite(equity_curve.to_numpy(dtype=float)).all():
+        raise ValueError("equity_curve contains non-finite values")
+    if (equity_curve < 0).any():
+        raise ValueError("equity_curve contains negative account equity")
 
     n = len(equity_curve)
 
@@ -178,22 +184,25 @@ def calc_metrics(
         bpy = bars_per_year
 
     port_ret = equity_curve.pct_change().fillna(0.0)
+    port_ret.iloc[0] = float(equity_curve.iloc[0] / initial_cash - 1)
+    if not np.isfinite(port_ret.to_numpy()).all():
+        raise ValueError("equity_curve returns are non-finite (zero equity followed by recovery)")
 
     total_ret = float(equity_curve.iloc[-1] / initial_cash - 1)
     ann_ret = float((1 + total_ret) ** (bpy / max(n, 1)) - 1)
-    vol = float(port_ret.std())
+    vol = float(port_ret.std()) if n > 1 else 0.0
     sharpe = float(port_ret.mean() / (vol + 1e-10) * np.sqrt(bpy))
 
     # Drawdown
-    peak = equity_curve.cummax()
+    peak = equity_curve.cummax().clip(lower=initial_cash)
     dd = (equity_curve - peak) / peak.replace(0, 1)
     max_dd = float(dd.min())
 
     calmar = ann_ret / abs(max_dd) if abs(max_dd) > 1e-10 else 0.0
 
     # Sortino
-    downside = port_ret[port_ret < 0]
-    downside_std = float(downside.std()) if len(downside) > 1 else 1e-10
+    # Downside deviation uses the entire return sample, not only losing bars.
+    downside_std = float(np.sqrt(np.mean(np.minimum(port_ret.to_numpy(), 0.0) ** 2)))
     sortino = float(port_ret.mean() / (downside_std + 1e-10) * np.sqrt(bpy))
 
     trade_stats = win_rate_and_stats(trades)
@@ -206,7 +215,7 @@ def calc_metrics(
         bench_return = float((1 + bench_ret).prod() - 1)
         excess = total_ret - bench_return
         active_ret = port_ret - bench_ret.reindex(port_ret.index).fillna(0.0)
-        active_std = float(active_ret.std())
+        active_std = float(active_ret.std()) if n > 1 else 0.0
         ir = float(active_ret.mean() / (active_std + 1e-10) * np.sqrt(bpy))
 
     return {

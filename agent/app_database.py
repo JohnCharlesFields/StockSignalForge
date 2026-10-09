@@ -70,6 +70,17 @@ def ensure_database() -> Path:
                     updated_at TEXT NOT NULL,
                     expires_at REAL
                 );
+                CREATE TABLE IF NOT EXISTS reference_evidence_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    as_of TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_evidence_symbol_date
+                ON reference_evidence_snapshots(symbol, kind, as_of DESC, fetched_at DESC);
 
                 CREATE TABLE IF NOT EXISTS overnight_alpha_cache (
                     cache_key TEXT PRIMARY KEY,
@@ -316,6 +327,11 @@ def ensure_database() -> Path:
             _ensure_column(conn, "predictions", "playbook_score", "REAL")
             _ensure_column(conn, "predictions", "market_rs_score", "REAL")
             _ensure_column(conn, "predictions", "playbook_tags", "TEXT")
+            _ensure_column(conn, "predictions", "evaluation_version", "TEXT NOT NULL DEFAULT 'legacy'")
+            _ensure_column(conn, "predictions", "forecast_json", "TEXT")
+            _ensure_column(conn, "predictions", "entry_date", "TEXT")
+            _ensure_column(conn, "predictions", "exit_date", "TEXT")
+            _ensure_column(conn, "predictions", "net_return", "REAL")
             conn.commit()
         _INITIALIZED = True
     return DB_PATH
@@ -371,6 +387,31 @@ def cache_set(cache_key: str, payload: Any, ttl_seconds: int | None = None) -> N
             (cache_key, _json_dump(payload), stamp, stamp, expires_at),
         )
         conn.commit()
+
+
+def reference_evidence_append(symbol: str, kind: str, as_of: str, payload: dict[str, Any]) -> str:
+    """Keep the first observation of each content version; never revise history."""
+    content = {k: v for k, v in payload.items() if k not in {"fetched_at", "snapshot_id"}}
+    digest = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
+    ident = f"{symbol}:{kind}:{as_of}:{digest}"
+    with _DB_LOCK, connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO reference_evidence_snapshots VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ident, symbol, kind, as_of, payload.get("fetched_at") or _utc_now(),
+             payload.get("source") or "gildata", _json_dump(payload)),
+        )
+        conn.commit()
+    return ident
+
+
+def reference_evidence_previous(symbol: str, kind: str, before_date: str, known_at: str) -> Optional[dict[str, Any]]:
+    with _DB_LOCK, connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM reference_evidence_snapshots "
+            "WHERE symbol=? AND kind=? AND as_of<? AND fetched_at<=? "
+            "ORDER BY as_of DESC, fetched_at DESC LIMIT 1", (symbol, kind, before_date, known_at),
+        ).fetchone()
+    return _json_load(row["payload_json"]) if row else None
 
 
 def overnight_alpha_get(cache_key: str) -> Optional[dict[str, Any]]:
@@ -501,7 +542,11 @@ def latest_home_dashboard_snapshot() -> Optional[dict[str, Any]]:
                     and row_count >= 0.5 * best_rows
                 )
                 candidates.append((source_priority, 1 if healthy else 0, str(row["generated_at"]), row, payload))
-            candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            # A larger old batch must not override a smaller fresh batch.
+            candidates.sort(key=lambda item: (
+                str(item[4].get("data_as_of") or item[4].get("required_price_session") or "")[:10],
+                item[0], item[1], item[2],
+            ), reverse=True)
             selected_row = candidates[0][3]
             selected_payload = candidates[0][4]
         else:
@@ -1165,9 +1210,8 @@ def portfolio_account_get() -> dict[str, Any]:
 def predictions_log_many(rows: list[dict[str, Any]]) -> int:
     """Idempotently log predictions.
 
-    The same symbol/date/horizon/signal row can be first logged as a full
-    candidate and later promoted to a board pick. Use an upsert instead of
-    INSERT OR IGNORE so the board-pick flag and rank stay current.
+    The first forecast is immutable. Later daily slices can update for the
+    monitor, but cannot change the probability, rank or features being tested.
     """
     ensure_database()
     stamp = _utc_now()
@@ -1185,22 +1229,9 @@ def predictions_log_many(rows: list[dict[str, Any]]) -> int:
                     entry_ref_price, horizon_days, curve_source, is_board_pick,
                     market_liquid_rs_top40, stock_stronger_than_industry,
                     playbook_score, market_rs_score, playbook_tags,
-                    mode, created_at, resolved
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                ON CONFLICT(as_of_date, symbol, horizon_days, signal_type) DO UPDATE SET
-                    rank = excluded.rank,
-                    calibrated_prob = COALESCE(excluded.calibrated_prob, predictions.calibrated_prob),
-                    entry_ref_price = COALESCE(excluded.entry_ref_price, predictions.entry_ref_price),
-                    curve_source = COALESCE(excluded.curve_source, predictions.curve_source),
-                    market_liquid_rs_top40 = excluded.market_liquid_rs_top40,
-                    stock_stronger_than_industry = excluded.stock_stronger_than_industry,
-                    playbook_score = COALESCE(excluded.playbook_score, predictions.playbook_score),
-                    market_rs_score = COALESCE(excluded.market_rs_score, predictions.market_rs_score),
-                    playbook_tags = COALESCE(excluded.playbook_tags, predictions.playbook_tags),
-                    is_board_pick = CASE
-                        WHEN predictions.is_board_pick = 1 OR excluded.is_board_pick = 1 THEN 1
-                        ELSE 0
-                    END
+                    mode, created_at, evaluation_version, forecast_json, resolved
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(as_of_date, symbol, horizon_days, signal_type) DO NOTHING
                 """,
                 (pid, str(r.get("as_of_date")), sym,
                  int(r["rank"]) if r.get("rank") is not None else None,
@@ -1214,7 +1245,8 @@ def predictions_log_many(rows: list[dict[str, Any]]) -> int:
                  float(r["playbook_score"]) if r.get("playbook_score") is not None else None,
                  float(r["market_rs_score"]) if r.get("market_rs_score") is not None else None,
                  _json_dump(r.get("playbook_tags") or []),
-                 str(r.get("mode") or "live"), stamp),
+                 str(r.get("mode") or "live"), stamp,
+                 str(r.get("evaluation_version") or "legacy"), _json_dump(r.get("forecast") or {})),
             )
             written += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         conn.commit()
@@ -1336,7 +1368,7 @@ def predictions_pending(limit: int = 2000) -> list[dict[str, Any]]:
     ensure_database()
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
-            "SELECT prediction_id, as_of_date, symbol, horizon_days, entry_ref_price, calibrated_prob "
+            "SELECT prediction_id, as_of_date, symbol, horizon_days, entry_ref_price, calibrated_prob, created_at, evaluation_version, forecast_json "
             "FROM predictions WHERE resolved = 0 ORDER BY as_of_date LIMIT ?",
             (max(1, int(limit)),),
         ).fetchall()
@@ -1345,16 +1377,17 @@ def predictions_pending(limit: int = 2000) -> list[dict[str, Any]]:
 
 def prediction_resolve(prediction_id: str, *, exit_price: float, forward_return: float,
                        baseline_return: float, excess_return: float, net_excess: float, win: int,
-                       beta_adjusted_alpha: float | None = None) -> None:
+                       beta_adjusted_alpha: float | None = None, entry_date: str | None = None,
+                       exit_date: str | None = None, net_return: float | None = None) -> None:
     ensure_database()
     with _DB_LOCK, _connect() as conn:
         conn.execute(
             "UPDATE predictions SET resolved=1, exit_price=?, forward_return=?, baseline_return=?, "
-            "excess_return=?, net_excess=?, win=?, beta_adjusted_alpha=?, resolved_at=? WHERE prediction_id=?",
+            "excess_return=?, net_excess=?, win=?, beta_adjusted_alpha=?, resolved_at=?, entry_date=?, exit_date=?, net_return=? WHERE prediction_id=? AND resolved=0",
             (float(exit_price), float(forward_return), float(baseline_return), float(excess_return),
              float(net_excess), int(win),
              float(beta_adjusted_alpha) if beta_adjusted_alpha is not None else None,
-             _utc_now(), prediction_id),
+             _utc_now(), entry_date, exit_date, net_return, prediction_id),
         )
         conn.commit()
 
@@ -1365,7 +1398,7 @@ def predictions_resolved(since_date: str | None = None, board_only: bool = True,
     q = ("SELECT as_of_date, symbol, rank, calibrated_prob, horizon_days, forward_return, "
          "baseline_return, excess_return, net_excess, win, beta_adjusted_alpha, "
          "market_liquid_rs_top40, stock_stronger_than_industry, playbook_score, "
-         "market_rs_score, playbook_tags FROM predictions WHERE resolved=1")
+         "market_rs_score, playbook_tags, evaluation_version, net_return FROM predictions WHERE resolved=1")
     params: list[Any] = []
     if board_only:
         q += " AND is_board_pick=1"
@@ -1381,7 +1414,7 @@ def predictions_resolved(since_date: str | None = None, board_only: bool = True,
     return [dict(r) for r in rows]
 
 
-def predictions_open(board_only: bool = True, mode: str | None = None) -> list[dict[str, Any]]:
+def predictions_open(board_only: bool = True, mode: str | None = None, evaluation_version: str | None = None) -> list[dict[str, Any]]:
     ensure_database()
     q = ("SELECT as_of_date, symbol, rank, calibrated_prob, horizon_days, entry_ref_price "
          "FROM predictions WHERE resolved=0")
@@ -1391,23 +1424,33 @@ def predictions_open(board_only: bool = True, mode: str | None = None) -> list[d
     if mode:
         q += " AND mode=?"
         params.append(mode)
+    if evaluation_version:
+        q += " AND evaluation_version=?"
+        params.append(evaluation_version)
     q += " ORDER BY as_of_date DESC, rank"
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(q, params).fetchall()
     return [dict(r) for r in rows]
 
 
-def predictions_count(mode: str | None = None) -> dict[str, int]:
+def predictions_count(mode: str | None = None, evaluation_version: str | None = None) -> dict[str, int]:
     ensure_database()
-    where = " WHERE mode=?" if mode else ""
-    params = (mode,) if mode else ()
+    clauses, values = [], []
+    if mode:
+        clauses.append("mode=?")
+        values.append(mode)
+    if evaluation_version:
+        clauses.append("evaluation_version=?")
+        values.append(evaluation_version)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    params = tuple(values)
     with _DB_LOCK, _connect() as conn:
         total = int(conn.execute(f"SELECT COUNT(*) n FROM predictions{where}", params).fetchone()["n"])
         resolved = int(conn.execute(
-            f"SELECT COUNT(*) n FROM predictions WHERE resolved=1{(' AND mode=?' if mode else '')}",
+            f"SELECT COUNT(*) n FROM predictions WHERE resolved=1{(' AND ' + ' AND '.join(clauses)) if clauses else ''}",
             params).fetchone()["n"])
         board = int(conn.execute(
-            f"SELECT COUNT(*) n FROM predictions WHERE is_board_pick=1{(' AND mode=?' if mode else '')}",
+            f"SELECT COUNT(*) n FROM predictions WHERE is_board_pick=1{(' AND ' + ' AND '.join(clauses)) if clauses else ''}",
             params).fetchone()["n"])
         by_mode = {row["mode"]: int(row["n"]) for row in conn.execute(
             "SELECT mode, COUNT(*) n FROM predictions GROUP BY mode")}

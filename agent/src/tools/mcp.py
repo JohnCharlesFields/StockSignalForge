@@ -499,7 +499,7 @@ class MCPRemoteTool(BaseTool):
             self._filter_arguments(kwargs),
             local_name=self.name,
         )
-        return json.dumps(payload, ensure_ascii=False, default=_json_default)
+        return json.dumps(_agent_result_projection(payload), ensure_ascii=False, default=_json_default)
 
     def _filter_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Drop local-only arguments before forwarding to the remote tool.
@@ -528,6 +528,55 @@ class MCPRemoteTool(BaseTool):
             }
 
         return {}
+
+
+def _strict_equal(left: Any, right: Any) -> bool:
+    """JSON value equality without conflating true, 1 and 1.0."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_strict_equal(left[k], right[k]) for k in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_strict_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def _agent_result_projection(payload: dict[str, Any]) -> dict[str, Any]:
+    """Remove exact mirrors only from the agent view; retain adapter evidence."""
+    if payload.get("status") != "ok" or "data" not in payload:
+        return payload
+    projected = deepcopy(payload)
+    data = payload["data"]
+    mirrors = [data, {"result": data}]
+    if "structured_content" in payload and any(
+        _strict_equal(payload["structured_content"], value) for value in mirrors
+    ):
+        projected.pop("structured_content", None)
+    blocks = payload.get("content")
+    if not isinstance(blocks, list):
+        return projected
+    retained = []
+    for block in blocks:
+        # Annotation/meta-bearing blocks are evidence, even if their text repeats data.
+        if isinstance(block, dict) and set(block) == {"type", "text"} and block["type"] == "text":
+            try:
+                decoded = json.loads(block["text"])
+            except (TypeError, ValueError):
+                pass
+            else:
+                if any(_strict_equal(decoded, value) for value in mirrors):
+                    continue
+        retained.append(block)
+    if len(retained) != len(blocks):
+        projected["content"] = retained
+        old_text = "\n".join(b["text"] for b in blocks if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+        if payload.get("text") == old_text:
+            new_text = "\n".join(b["text"] for b in retained if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+            if new_text:
+                projected["text"] = new_text
+            else:
+                projected.pop("text", None)
+    return projected
 
 
 def _run_sync(operation: Callable[[], Coroutine[Any, Any, ResultT]]) -> ResultT:

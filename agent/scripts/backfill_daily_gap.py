@@ -72,7 +72,11 @@ def backfill(start: str, end: str, execute: bool, max_cost_usd: float, only_symb
     if not symbols:
         raise RuntimeError("No existing OHLCV cache files were found")
     client = db.Historical()
-    cost = client.metadata.get_cost(dataset=DATASET, symbols=symbols, schema=SCHEMA, start=start, end=end)
+    try:
+        cost = client.metadata.get_cost(dataset=DATASET, symbols=symbols, schema=SCHEMA, start=start, end=end)
+    except Exception as exc:
+        print(json.dumps({"repair_error": type(exc).__name__, "phase": "cost_estimate", "download_started": False}), file=sys.stderr, flush=True)
+        raise
     report: dict = {
         "dataset": DATASET, "schema": SCHEMA, "start": start, "end_exclusive": end,
         "cache_symbols": len(symbols), "estimated_cost_usd": cost,
@@ -83,6 +87,7 @@ def backfill(start: str, end: str, execute: bool, max_cost_usd: float, only_symb
     if cost > max_cost_usd:
         raise RuntimeError(f"Estimated cost ${cost:.4f} exceeds cap ${max_cost_usd:.4f}")
 
+    print(json.dumps({"phase": "download", "download_started": True, "estimated_cost_usd": cost}), file=sys.stderr, flush=True)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         data = client.timeseries.get_range(

@@ -953,17 +953,20 @@ function BasketView() {
 
 function ScorecardView() {
   const [mode, setMode] = useState<"live" | "backfill">("live");
+  const [evaluationVersion, setEvaluationVersion] = useState("legacy");
+  const [parameterStatus, setParameterStatus] = useState<Awaited<ReturnType<typeof api.getPullbackParameterStatus>> | null>(null);
   const [sc, setSc] = useState<PredictionScorecard | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const fetchSc = (m: "live" | "backfill") => {
     setLoading(true);
-    api.getPredictionScorecard(m).then(setSc).catch(() => setSc(null)).finally(() => setLoading(false));
+    api.getPredictionScorecard(m, evaluationVersion).then(setSc).catch(() => setSc(null)).finally(() => setLoading(false));
+    api.getPullbackParameterStatus().then(setParameterStatus).catch(() => setParameterStatus(null));
   };
   useEffect(() => {
     fetchSc(mode);
-  }, [mode]);
+  }, [mode, evaluationVersion]);
 
   const runResolve = async () => {
     setBusy(true);
@@ -1018,8 +1021,19 @@ function ScorecardView() {
 
   const c = sc?.counts;
   const ci = sc?.net_excess_ci;
+  const negativeEvidence = ci?.[1] != null && ci[1] < 0;
   return (
     <section className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        <label htmlFor="prediction-evaluation">结算口径</label>
+        <select id="prediction-evaluation" value={evaluationVersion} onChange={e => setEvaluationVersion(e.target.value)} className="rounded border bg-background px-2 py-1">
+          <option value="legacy">历史口径 · 待审计</option>
+          <option value="recorded_open_v3">新口径 · 记录后开盘</option>
+        </select>
+        {parameterStatus && <span className="text-xs text-muted-foreground">参数验证 · 每 {parameterStatus.interval_days} 天 · {parameterStatus.latest?.status === "completed" ? "已生成研究报告" : parameterStatus.latest?.status === "running" ? "运行中" : parameterStatus.latest?.status === "failed" ? "上次未完成" : "等待运行"} · {parameterStatus.active ? "已有验证版本" : "沿用当前参数"}</span>}
+        <button type="button" className="text-xs text-primary underline" onClick={async () => {const result = await api.trainPullbackParameters().catch(() => null); toast.info(result?.status === "running" ? "参数验证已启动" : "参数任务暂未启动，稍后刷新状态");}}>运行参数验证</button>
+      </div>
+      {sc?.evaluation_note && <p className="text-xs text-muted-foreground">{sc.evaluation_note}</p>}
       <div className="flex flex-col gap-3 rounded-lg border bg-card p-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <div className="mb-1 inline-flex items-center gap-2 text-xs font-medium text-primary">
@@ -1092,13 +1106,15 @@ function ScorecardView() {
         <>
           <div className={cn(
             "rounded-lg border p-3 text-sm",
-            sc.significant ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+            negativeEvidence ? "border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300" : sc.significant ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
               : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
           )}>
-            {sc.significant ? (
-              <span className="inline-flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4" />实盘净超额显著为正（CI 排除0）——edge 在实盘中得到确认。</span>
+            {negativeEvidence ? (
+              <>当前计算的净超额区间低于零，表现偏弱；需结合数据审计及重叠持有验证复核。</>
+            ) : sc.significant ? (
+              <span className="inline-flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4" />当前净超额区间为正，仍需核验数据与重叠持有。</span>
             ) : (
-              <>⚠️ 样本 {sc.n_resolved} 笔 / {sc.trading_days} 个交易日，<b>尚未达到统计显著</b>（净超额 CI 仍跨0）。edge 小(~1%/10日)，需数百笔才会收窄——<b>别因短期红绿改模型</b>。</>
+              <>样本 {sc.n_resolved} 笔 / {sc.trading_days} 个信号日：{ci?.[0] == null ? "日期不足，暂不报告有效区间。" : "当前区间跨零，尚无明确证据。"} 相邻持有窗口可能重叠，记录笔数不等于独立样本数。</>
             )}
           </div>
 
@@ -1115,6 +1131,7 @@ function ScorecardView() {
                 {signedPct(sc.mean_net_excess, 1)}
               </div>
               <div className="mt-1 text-[11px] text-muted-foreground">95% CI [{signedPct(ci?.[0] ?? null, 1)}, {signedPct(ci?.[1] ?? null, 1)}]（按交易日聚类）</div>
+              <div className="mt-1 text-[11px] text-muted-foreground">重叠调整区间：{sc.overlap_adjusted_ci?.[0] != null ? `[${signedPct(sc.overlap_adjusted_ci[0], 1)}, ${signedPct(sc.overlap_adjusted_ci[1], 1)}]` : "信号日期不足"}；净收益 {signedPct(sc.mean_net_return, 1)}</div>
             </ScCard>
             <ScCard title="Brier 分 / 技巧分">
               <div className="text-2xl font-semibold tabular-nums">{sc.brier?.toFixed(3) ?? "--"}</div>
@@ -1134,7 +1151,7 @@ function ScorecardView() {
                 <span className="text-muted-foreground">95% CI [{signedPct(sc.beta_alpha.ci?.[0] ?? null, 2)}, {signedPct(sc.beta_alpha.ci?.[1] ?? null, 2)}]</span>
                 <span className="text-muted-foreground">n={sc.beta_alpha.n}</span>
                 <span className={cn("rounded px-1.5 py-0.5 text-[11px]", sc.beta_alpha.significant ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/15 text-amber-700 dark:text-amber-300")}>
-                  {sc.beta_alpha.significant ? "✅ 剥离大盘后仍显著" : "尚未显著"}
+                  {sc.beta_alpha.ci?.[1] != null && sc.beta_alpha.ci[1] < 0 ? "区间为负" : sc.beta_alpha.significant ? "区间为正" : "证据不足"}
                 </span>
               </div>
               {sc.beta_alpha.note && <p className="mt-1 text-xs text-muted-foreground">{sc.beta_alpha.note}</p>}

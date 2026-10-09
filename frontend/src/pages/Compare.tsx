@@ -15,6 +15,7 @@ interface MetricDef {
 }
 
 function fmt(v: unknown, type: "pct" | "num" | "int" | "days" = "num"): string {
+  if (v == null || v === "") return "\u2014";
   const n = Number(v);
   if (!Number.isFinite(n)) return "\u2014";
   if (type === "pct") return (n * 100).toFixed(2) + "%";
@@ -24,6 +25,7 @@ function fmt(v: unknown, type: "pct" | "num" | "int" | "days" = "num"): string {
 }
 
 function diffClass(a: unknown, b: unknown, higherIsBetter: boolean): string {
+  if (a == null || b == null) return "";
   const na = Number(a), nb = Number(b);
   if (!Number.isFinite(na) || !Number.isFinite(nb)) return "";
   const better = higherIsBetter ? nb > na : nb < na;
@@ -32,6 +34,7 @@ function diffClass(a: unknown, b: unknown, higherIsBetter: boolean): string {
 }
 
 function diffStr(a: unknown, b: unknown, type: "pct" | "num" | "int" | "days"): string {
+  if (a == null || b == null) return "\u2014";
   const na = Number(a), nb = Number(b);
   if (!Number.isFinite(na) || !Number.isFinite(nb)) return "\u2014";
   const d = nb - na;
@@ -60,6 +63,7 @@ const METRICS: MetricDef[] = [
   { key: "volatility",             label: "Volatility",           type: "pct", higherIsBetter: false },
   { key: "win_rate",               label: "Win Rate",             type: "pct", higherIsBetter: true },
   { key: "profit_factor",          label: "Profit Factor",        type: "num", higherIsBetter: true },
+  { key: "profit_loss_ratio",      label: "Avg Win / Avg Loss",   type: "num", higherIsBetter: true },
   { key: "avg_win",                label: "Avg Win",              type: "pct", higherIsBetter: true },
   { key: "avg_loss",               label: "Avg Loss",             type: "pct", higherIsBetter: false },
   { key: "trade_count",            label: "Trades",               type: "int", higherIsBetter: true },
@@ -73,7 +77,6 @@ const METRIC_ALIASES: Record<string, string> = {
   annual_return: "annualized_return",
   calmar: "calmar_ratio",
   sortino: "sortino_ratio",
-  profit_loss_ratio: "profit_factor",
   max_consec_loss: "max_consecutive_losses",
   max_consecutive_loss: "max_consecutive_losses",
   avg_hold_days: "avg_holding_period",
@@ -197,7 +200,7 @@ function EquityChartOverlay({ leftCurve, rightCurve, leftLabel, rightLabel }: Eq
 }
 
 export function Compare() {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [leftId, setLeftId] = useState("");
   const [rightId, setRightId] = useState("");
@@ -249,7 +252,8 @@ export function Compare() {
     max_drawdown: t.metricMaxDrawdown,
     volatility: t.metricVolatility,
     win_rate: t.metricWinRate,
-    profit_factor: t.metricProfitLossRatio,
+    profit_factor: lang === "zh" ? "盈利因子（总盈利/总亏损）" : "Profit Factor",
+    profit_loss_ratio: lang === "zh" ? "平均盈亏比" : "Avg Win / Avg Loss",
     avg_win: t.metricAvgWin,
     avg_loss: t.metricAvgLoss,
     trade_count: t.metricTradeCount,

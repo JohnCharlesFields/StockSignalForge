@@ -81,7 +81,15 @@ def monte_carlo_test(
 
 def _path_metrics(pnls: np.ndarray, initial_capital: float) -> Dict[str, float]:
     """Compute Sharpe and max drawdown from a PnL sequence."""
-    equity = initial_capital + np.cumsum(pnls)
+    if not np.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValueError("initial_capital must be finite and positive")
+    if not np.isfinite(pnls).all():
+        raise ValueError("pnls contains non-finite values")
+    equity = np.concatenate(([initial_capital], initial_capital + np.cumsum(pnls)))
+    if (equity < 0).any():
+        raise ValueError("PnL path contains negative account equity")
+    if (equity[:-1] == 0).any():
+        raise ValueError("PnL path returns are undefined after zero equity")
     returns = np.diff(equity) / equity[:-1] if len(equity) > 1 else np.array([0.0])
     std = returns.std()
     sharpe = float(returns.mean() / (std + 1e-10) * np.sqrt(252))

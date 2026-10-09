@@ -44,7 +44,7 @@ class DailyScanIntegrityTests(unittest.TestCase):
             }),
             patch.object(api_server, "_build_home_dashboard_snapshot_payload", return_value={"rows": [{"symbol": "NVDA"}]}),
             patch.object(api_server, "save_home_dashboard_snapshot", side_effect=lambda *args, **kwargs: calls.append(("snapshot", None)) or "snap-1"),
-            patch.object(priority_board_service, "compute_priority_board", side_effect=lambda *args, **kwargs: calls.append(("board", None)) or {"picks": [{"symbol": "NVDA"}]}),
+            patch.object(priority_board_service, "compute_priority_board", side_effect=lambda *args, **kwargs: calls.append(("board", None)) or {"data_as_of": session.isoformat(), "picks": [{"symbol": "NVDA"}]}),
             patch.object(prediction_ledger_service, "log_predictions", side_effect=log_predictions),
             patch.object(api_server, "_prewarm_track_leaders", side_effect=AssertionError("optional prewarm blocked persistence")),
         ):
@@ -67,6 +67,7 @@ class DailyScanIntegrityTests(unittest.TestCase):
                 patch.object(api_server, "cache_get", return_value=None),
                 patch.object(api_server, "cache_set", side_effect=save),
                 patch.object(api_server, "_daily_report_price_coverage", return_value={"current": 0, "total": 10, "ratio": 0, "missing_reports": []}),
+                patch.object(api_server, "_daily_databento_gap_repair", return_value={"ok": False, "error": "mock unavailable"}),
                 patch.object(ingest_grouped_daily, "ingest_recent_grouped_daily", return_value=ingest),
             ):
                 with self.assertRaisesRegex(RuntimeError, "旧榜单保留"):
@@ -81,7 +82,7 @@ class DailyScanIntegrityTests(unittest.TestCase):
             patch.object(ingest_grouped_daily, "ingest_recent_grouped_daily", side_effect=AssertionError("no new price sync")),
             patch.object(api_server, "_build_home_dashboard_snapshot_payload", return_value={"rows": [{"symbol": "NVDA"}]}),
             patch.object(api_server, "save_home_dashboard_snapshot", return_value="snap-2"),
-            patch.object(priority_board_service, "compute_priority_board", return_value={"picks": [{"symbol": "NVDA"}]}),
+            patch.object(priority_board_service, "compute_priority_board", return_value={"data_as_of": session, "picks": [{"symbol": "NVDA"}]}),
             patch.object(prediction_ledger_service, "log_predictions", return_value={"slice_rows_written": 1}) as ledger,
         ):
             result = api_server._daily_post_scan_finalize(["ndx"])
@@ -105,7 +106,7 @@ class DailyScanIntegrityTests(unittest.TestCase):
                 "rows": [{"symbol": "NVDA"}], "excluded_stale_count": 1, "price_coverage": 0.99,
             }),
             patch.object(api_server, "save_home_dashboard_snapshot", return_value="snap-cache"),
-            patch.object(priority_board_service, "compute_priority_board", return_value={"picks": [{"symbol": "NVDA"}]}),
+            patch.object(priority_board_service, "compute_priority_board", return_value={"data_as_of": session, "picks": [{"symbol": "NVDA"}]}),
             patch.object(prediction_ledger_service, "log_predictions", return_value={"slice_rows_written": 1}),
         ):
             result = api_server._daily_post_scan_finalize(["ndx"])

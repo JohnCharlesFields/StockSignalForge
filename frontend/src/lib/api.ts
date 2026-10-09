@@ -101,6 +101,8 @@ export const api = {
       body: JSON.stringify(settings),
     }),
   getDataSourceSettings: () => request<DataSourceSettings>("/settings/data-sources"),
+  getMarketDataStatus: () => request<{ configuration_only: boolean; daily_cache_price_basis: string;
+    price_basis_note: string; ohlcv_priority: string[]; provider_configuration: Record<string, string> }>("/market-data/status"),
   updateDataSourceSettings: (settings: UpdateDataSourceSettingsRequest) =>
     request<DataSourceSettings>("/settings/data-sources", {
       method: "PUT",
@@ -231,8 +233,10 @@ export const api = {
     request<TrackLeaderResponse>(`/track-leader/${encodeURIComponent(symbol)}`),
 
   // Forward-verification ledger (predicted vs realized track record)
-  getPredictionScorecard: (mode: "live" | "backfill" | "any" = "live") =>
-    request<PredictionScorecard>(`/predictions/scorecard?mode=${mode}`),
+  getPredictionScorecard: (mode: "live" | "backfill" | "any" = "live", version = "legacy") =>
+    request<PredictionScorecard>(`/predictions/scorecard?mode=${mode}&evaluation_version=${version}`),
+  getPullbackParameterStatus: () => request<{enabled: boolean; interval_days: number; auto_activate: boolean; latest?: {status?: string; candidate_version?: string; rejection_reasons?: string[]}; active?: unknown}>("/pullback-parameters/status"),
+  trainPullbackParameters: () => request<{status: string}>("/pullback-parameters/train", {method: "POST"}),
   logPredictionsNow: () => request<unknown>("/predictions/log?log_all=true", { method: "POST" }),
   resolvePredictionsNow: () =>
     request<{ resolve: unknown; scorecard: PredictionScorecard }>("/predictions/resolve", { method: "POST" }),
@@ -476,6 +480,8 @@ export interface PremarketNewsRefreshResponse {
 }
 
 export interface PremarketNewsAutoStatus {
+  gildata_supplement?: { status?: string; accepted?: number } | null;
+  gildata_news?: { status?: string; reason?: string; primary_enabled?: boolean } | null;
   enabled?: boolean;
   interval_seconds?: number;
   status?: string;
@@ -489,6 +495,7 @@ export interface PremarketNewsAutoStatus {
     written?: number;
     universe_symbol_count?: number;
     window?: { start_utc?: string; end_utc?: string };
+    source_audit?: { yahoo_raw_count?: number; yahoo?: { failures?: { symbol: string; error_type: string }[] } };
   } | null;
 }
 
@@ -521,6 +528,7 @@ export interface PremarketNewsItem {
   article_url?: string;
   published_utc?: string;
   source?: string;
+  source_provenance?: { reported_time?: string; time_status?: string; queue_time_basis?: string; original_verified?: boolean; note?: string };
   sentiment?: "positive" | "negative" | "neutral" | string;
   sentiment_score?: number;
   sentiment_reasoning?: string;
@@ -555,6 +563,8 @@ export interface PremarketNewsResponse {
   offset: number;
   reviewed: string;
   recent_days?: number;
+  source_mix_degraded?: boolean;
+  source_mix_warning?: string;
   latest_update?: { updated_at?: string | null; latest_news?: string | null };
   source_audit?: PremarketNewsSourceAudit;
 }
@@ -1475,6 +1485,7 @@ export interface LongOptionWaveStructure {
 }
 
 export interface LongOptionReview {
+  reference_evidence?: import("@/components/GildataEvidence").GildataEvidence;
   available: boolean;
   status: string;
   symbol: string;
@@ -1833,12 +1844,18 @@ export interface PredictionScorecard {
   method_note?: string;
   n_resolved?: number;
   trading_days?: number;
-  predicted_win_rate?: number;
+  predicted_win_rate?: number | null;
   realized_win_rate?: number;
   mean_net_excess?: number;
   net_excess_ci?: [number | null, number | null];
   significant?: boolean;
-  brier?: number;
+  evidence_direction?: "positive" | "negative" | "inconclusive";
+  evaluation_version?: string;
+  evaluation_note?: string;
+  overlap_adjusted_ci?: [number | null, number | null];
+  mean_net_return?: number | null;
+  horizon_cohorts?: {horizon_days: number; n: number; mean_net_excess: number}[];
+  brier?: number | null;
   brier_skill_score?: number | null;
   reliability_buckets?: { label: string; n: number; predicted: number; realized: number }[];
   rank_buckets?: { label: string; n: number; predicted_win_rate: number; realized_win_rate: number; mean_net_excess: number }[];
@@ -1879,6 +1896,7 @@ export interface PredictionScorecard {
     win_rate: number;
     ci: [number | null, number | null];
     significant: boolean;
+    evidence_direction?: "positive" | "negative" | "inconclusive";
     note?: string;
   };
   scope?: string;

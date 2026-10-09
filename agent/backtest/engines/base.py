@@ -633,7 +633,9 @@ class BaseEngine(ABC):
 
         # Equity curve
         port_ret = equity_series.pct_change().fillna(0.0)
-        peak = equity_series.cummax()
+        initial_cash = self.initial_capital
+        port_ret.iloc[0] = equity_series.iloc[0] / initial_cash - 1.0
+        peak = equity_series.cummax().clip(lower=initial_cash)
         dd = (equity_series - peak) / peak.replace(0, 1)
         eq_df = pd.DataFrame({
             "ret": port_ret,

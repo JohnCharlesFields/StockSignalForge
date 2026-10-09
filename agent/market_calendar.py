@@ -19,11 +19,22 @@ day's 16:00 ET close -- so ``most_recent_session`` resolves to that session.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
+
+# Official NYSE calendar, published 2025-12-23 (cash-equity close, not options).
+# https://ir.theice.com/press/news-details/2025/NYSE-Group-Announces-2026-2027-and-2028-Holiday-and-Early-Closings-Calendar/
+_EARLY_CLOSE_DAYS = {date(2026, 11, 27), date(2026, 12, 24), date(2027, 11, 26),
+                     date(2028, 7, 3), date(2028, 11, 24)}
+
+
+def session_close_et(d: date) -> datetime:
+    """Cash-equity regular close; published early-close coverage: 2026..2028."""
+    hour = 13 if d in _EARLY_CLOSE_DAYS else 16
+    return datetime.combine(d, time(hour), tzinfo=_ET)
 
 
 def _easter(year: int) -> date:
@@ -101,11 +112,11 @@ def previous_trading_day(d: date) -> date:
 def most_recent_session(now: Optional[datetime] = None) -> date:
     """The most recently *completed* regular US session as of ``now``.
 
-    A session counts as complete once 16:00 ET has passed on that day.
+    A session counts as complete at its scheduled close (13:00 on early closes).
     """
     now_et = (now or datetime.now(tz=_ET)).astimezone(_ET)
     today = now_et.date()
-    after_close = now_et.hour >= 16
+    after_close = now_et >= session_close_et(today)
     if is_trading_day(today) and after_close:
         return today
     return previous_trading_day(today)
@@ -136,4 +147,7 @@ def market_status(now: Optional[datetime] = None) -> dict:
         "today_is_trading_day": is_trading_day(now_et.date()),
         "most_recent_session": session.isoformat(),
         "previous_session": previous_trading_day(session).isoformat(),
+        "scheduled_close_et": session_close_et(now_et.date()).isoformat() if is_trading_day(now_et.date()) else None,
+        "early_close": now_et.date() in _EARLY_CLOSE_DAYS,
+        "early_close_calendar_verified": 2026 <= now_et.year <= 2028,
     }

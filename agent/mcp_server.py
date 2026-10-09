@@ -145,6 +145,16 @@ def backtest(run_dir: str) -> str:
     return run_backtest(run_dir)
 
 
+@mcp.tool
+def read_run_artifact(run_dir: str, artifact: str, offset: int = 0, limit: int = 20,
+                      columns: list[str] | None = None, mode: str = "rows") -> str:
+    """Read hash-verified built-in backtest CSVs. Use meta/rows/downsample;
+    aliases: metrics, equity, trades, ohlcv:TICKER. Follow next_offset for paging.
+    """
+    from src.tools.run_artifact_tool import read_run_artifact as read_verified
+    return read_verified(run_dir, artifact, offset=offset, limit=limit, columns=columns, mode=mode)
+
+
 # ---------------------------------------------------------------------------
 # Factor analysis tool
 # ---------------------------------------------------------------------------

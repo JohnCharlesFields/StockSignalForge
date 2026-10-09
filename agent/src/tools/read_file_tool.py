@@ -24,6 +24,8 @@ class ReadFileTool(BaseTool):
         "properties": {
             "path": {"type": "string", "description": "File path relative to run_dir or skills/"},
             "limit": {"type": "integer", "description": "Max number of lines to return (default: all)"},
+            "offset_chars": {"type": "integer", "minimum": 0, "description": "Character offset for paging long saved tool evidence"},
+            "max_chars": {"type": "integer", "minimum": 1, "maximum": 8000, "description": "Character page size; use 2000 for saved JSON evidence and follow next_offset_chars"},
         },
         "required": ["path"],
     }
@@ -40,6 +42,8 @@ class ReadFileTool(BaseTool):
         """
         file_path = kwargs["path"]
         limit = kwargs.get("limit")
+        offset_chars = kwargs.get("offset_chars", 0)
+        max_chars = kwargs.get("max_chars")
         run_dir = kwargs.get("run_dir")
 
         allowed_roots = []
@@ -88,19 +92,28 @@ class ReadFileTool(BaseTool):
 
         try:
             text = resolved.read_text(encoding="utf-8")
+            total_chars = len(text)
+            if not isinstance(offset_chars, int) or offset_chars < 0 or (max_chars is not None and (not isinstance(max_chars, int) or not 1 <= max_chars <= 8000)):
+                raise ValueError("offset_chars must be >= 0; max_chars must be 1..8000")
+            paged = max_chars is not None
+            if paged:
+                text = text[offset_chars:offset_chars + max_chars]
+            elif offset_chars:
+                raise ValueError("offset_chars requires max_chars")
             if limit and limit > 0:
                 lines = text.splitlines(keepends=True)
                 text = "".join(lines[:limit])
             if len(text) > _OUTPUT_LIMIT:
                 text = text[:_OUTPUT_LIMIT] + "\n... (truncated)"
-            return json.dumps(
-                {
+            payload = {
                     "status": "ok",
                     "path": str(resolved),
                     "content": text,
-                },
-                ensure_ascii=False,
-            )
+                }
+            if paged:
+                payload.update({"offset_chars": offset_chars, "total_chars": total_chars,
+                                "next_offset_chars": offset_chars + len(text) if offset_chars + len(text) < total_chars else None})
+            return json.dumps(payload, ensure_ascii=False)
         except Exception as exc:
             return json.dumps(
                 {

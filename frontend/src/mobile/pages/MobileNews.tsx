@@ -48,6 +48,7 @@ const SENTIMENT_CN: Record<string, { label: string; tone: string; chip: "good" |
   positive: { label: "利好", tone: "text-emerald-600 dark:text-emerald-400", chip: "good" },
   negative: { label: "利空", tone: "text-rose-600 dark:text-rose-400", chip: "bad" },
   neutral: { label: "中性", tone: "text-muted-foreground", chip: "neutral" },
+  unreviewed: { label: "待研判", tone: "text-muted-foreground", chip: "neutral" },
 };
 
 function tierTone(tone?: string): "strong" | "good" | "warn" | "neutral" {
@@ -133,7 +134,7 @@ function CardContent({ item, onOpenReader, labeled }: { item: PremarketNewsItem;
       )}
 
       <div className="mt-auto flex items-center justify-between gap-2 border-t pt-2 text-[11px] text-muted-foreground">
-        <span className="m-break min-w-0 truncate">{item.publisher || item.source || "—"} · {fmtTime(item.published_utc)}</span>
+        <span className="m-break min-w-0 truncate">{item.publisher || item.source || "—"} · {item.source_provenance?.reported_time || fmtTime(item.published_utc)}</span>
         <button
           type="button"
           onPointerDown={(e) => e.stopPropagation()}
@@ -177,7 +178,7 @@ function ArticleReader({ item, onClose }: { item: PremarketNewsItem; onClose: ()
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold">{item.publisher || item.source || "原文"}</div>
           <div className="text-[11px] text-muted-foreground">
-            {fmtTime(item.published_utc)}
+            {item.source_provenance?.reported_time || fmtTime(item.published_utc)}
             {item.source_tier_cn ? ` · ${item.source_tier_cn}` : ""}
           </div>
         </div>
@@ -203,7 +204,7 @@ function ArticleReader({ item, onClose }: { item: PremarketNewsItem; onClose: ()
           {body ? highlightTickers(body, tickers) : <span className="text-muted-foreground">（数据源未提供正文）</span>}
         </div>
         <p className="mt-4 rounded-lg bg-muted/40 p-2.5 text-[11px] leading-relaxed text-muted-foreground">
-          以上为数据源（Polygon/Massive）抓取的原文摘要；发行方完整正文多受付费墙 / 反爬限制，无法稳定抓取全文。
+          {item.source_provenance?.note || "以上为数据源抓取的原文摘要；发行方完整正文多受付费墙 / 反爬限制，无法稳定抓取全文。"}
         </p>
         {item.article_url && (
           <a

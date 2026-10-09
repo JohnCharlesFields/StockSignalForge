@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -143,7 +143,7 @@ export function Layout() {
     <div className="flex h-screen bg-background">
       <aside className={cn("flex shrink-0 flex-col border-r bg-card transition-all duration-200", collapsed ? "w-12" : "w-64")}>
         <div className={cn("border-b", collapsed ? "flex justify-center p-2" : "p-4")}>
-          <Link to="/" className={cn("flex items-center text-sm font-bold tracking-tight", collapsed ? "justify-center" : "gap-2")}>
+          <Link to="/" title="金融机构开发者 × 聚源数据地图 MCP：开源 AI 量化与投研系统。" className={cn("flex items-center text-sm font-bold tracking-tight", collapsed ? "justify-center" : "gap-2")}>
             <span className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full border-2 border-amber-500/80 text-[9px] font-black text-amber-500">
               <CircleDot className="absolute h-5 w-5 opacity-45" />
               <span className="relative">35</span>
@@ -151,7 +151,7 @@ export function Layout() {
             {!collapsed && (
               <span>
                 <span className="block">StockSignalForge</span>
-                <span className="block text-[9px] font-medium uppercase tracking-widest text-muted-foreground">research board</span>
+                <span className="block text-[10px] font-medium text-muted-foreground">聚源数据地图 MCP · AI 投研</span>
               </span>
             )}
           </Link>

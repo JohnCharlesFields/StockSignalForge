@@ -37,6 +37,7 @@ export function BatchTasks() {
   const [collecting, setCollecting] = useState(false);
   const [rebuild, setRebuild] = useState<CalibRebuildStatus | null>(null);
   const [feishu, setFeishu] = useState<FeishuMobileUrl | null>(null);
+  const [dataStatus, setDataStatus] = useState<Awaited<ReturnType<typeof api.getMarketDataStatus>> | null>(null);
   const pollRef = useRef<number | null>(null);
   const rebuildPollRef = useRef<number | null>(null);
 
@@ -46,6 +47,7 @@ export function BatchTasks() {
     api.getPriorityBoard(1).then(setBoard).catch(() => {});
     api.getCalibRebuildStatus().then(setRebuild).catch(() => {});
     api.getFeishuMobileUrl().then(setFeishu).catch(() => {});
+    api.getMarketDataStatus().then(setDataStatus).catch(() => {});
   }, []);
 
   const copyText = async (text: string) => {
@@ -183,6 +185,18 @@ export function BatchTasks() {
             <RefreshCw className="h-4 w-4" /> 刷新
           </button>
         </section>
+
+        {dataStatus && <section className="border-b pb-4 space-y-2">
+          <h2 className="text-base font-semibold">行情数据口径与配置状态</h2>
+          <div className="text-sm">日线优先级：{dataStatus.ohlcv_priority.join(" → ")}</div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            {Object.entries(dataStatus.provider_configuration).map(([name, status]) => <span key={name}
+              className={cn("border rounded px-2 py-1", status === "configured_unprobed" ? "border-amber-500/30 text-amber-700 dark:text-amber-300" : "text-muted-foreground") }>
+              {name} · {status === "configured_unprobed" ? "已配置，授权待核验" : "未配置"}
+            </span>)}
+          </div>
+          <p className="text-xs text-muted-foreground">{dataStatus.price_basis_note}</p>
+        </section>}
 
         {/* Feishu mobile public URL (Cloudflare Quick Tunnel) */}
         <section className="rounded-lg border bg-card p-4">

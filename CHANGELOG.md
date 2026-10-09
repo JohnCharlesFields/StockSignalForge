@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Vibe-Trading are documented in this file.
+StockSignalForge updates appear first; older entries retain Vibe-Trading upstream history.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
@@ -10,6 +10,33 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 ### Fixed
+
+## [2026-10-09] Public Source Sync and Research Evidence
+
+This release publishes completed October 8 changes and October 9 branding/docs.
+
+### Added
+- Dated GilData company/industry references, EPS/revenue revisions and dispersion, cache-only DeepSeek evidence, and additive SQLite evidence archives.
+- Bounded optional reference/research background refresh and supplemental Chinese news within the existing 15-minute workflow. Unverified summaries remain unreviewed; links and opening-return estimates are not fabricated.
+- Immutable first predictions, evaluation-version-separated forward reconciliation, time-purged parameter experiments, parameter registry, candidate reports and promotion gates. Public defaults disable automatic training and activation; private historical datasets are not distributed.
+- Run artifact reading, backtest summaries, context budgets, and regression tests for provider recovery, freshness, evidence provenance and statistical boundaries.
+
+### Changed
+- Unified project title: 金融机构开发者 × 聚源数据地图 MCP：开源 AI 量化与投研系统。 Retained StockSignalForge as repository/compact interface name and upstream attribution.
+- Explicit private HTTPS MCP endpoint configuration remains required; endpoints containing authentication/query information are rejected before network access.
+- Clarified research probabilities vs forward results, data dates vs collection times, annual vs quarterly estimates, and incomplete source provenance.
+
+### Fixed
+- Respect provider Retry-After and count retry requests against quota; retain ambiguous cost reservations while releasing confirmed pre-download failures.
+- Reject old board dates for new prediction logging; align future daily gap repair to raw-price cache basis without claiming old caches are audited.
+- Prevent partial/late reference refreshes overwriting valid newer evidence; preserve news source links and feedback.
+- Correct negative-CI interpretation and historical baseline timing; preserve old settled results rather than cosmetically rewriting history.
+- Account initial-cost drawdown, degenerate backtest ratio handling, and Qlib rolling directional counts.
+
+### Verification and Limits
+- October 8 evidence integration passed 119 related main tests; this is not a full-suite claim. Public-copy verification is recorded in PUBLIC_RELEASE.md.
+- Parameter candidates did not outperform the fixed baseline and were not activated. Historical replay was previously examined; no clean out-of-sample profitability or improved win rate is asserted.
+- API keys, private MCP settings/endpoints, cookies, databases, cache, reports, personal handoff logs and supplier datasets remain excluded. Existing screenshot galleries are historical illustrations, not proof of latest strategy performance.
 
 ## [0.1.8] — 2026-05-17
 

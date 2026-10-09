@@ -9,6 +9,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -254,7 +255,7 @@ def _massive_get(path: str, **params: Any) -> Any:
     if not external_data_allowed():
         return None
     api_key = os.environ.get("MASSIVE_API_KEY", "").strip()
-    if not api_key or not _claim("massive", _env_int("MASSIVE_PER_MINUTE", 200), _env_int("MASSIVE_PER_DAY", 50000)):
+    if not api_key:
         return None
     params["apiKey"] = api_key
     # Lightweight retry/backoff so a transient proxy/network blip (or a 429/5xx)
@@ -264,10 +265,28 @@ def _massive_get(path: str, **params: Any) -> Any:
     attempts = _env_int("MASSIVE_RETRIES", 2) + 1
     last_exc: Exception | None = None
     for i in range(attempts):
+        if not _claim("massive", _env_int("MASSIVE_PER_MINUTE", 200), _env_int("MASSIVE_PER_DAY", 50000)):
+            return None
         try:
             r = requests.get(f"{_MASSIVE_BASE}{path}", params=params, timeout=20)
             if r.status_code in (429, 500, 502, 503, 504) and i < attempts - 1:
-                time.sleep(0.6 * (2 ** i))
+                delay = 0.6 * (2 ** i)
+                if r.status_code == 429:
+                    delay = max(15.0, delay)
+                    retry_after = r.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            delay = max(delay, float(retry_after))
+                        except ValueError:
+                            try:
+                                delay = max(delay, (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
+                            except (TypeError, ValueError):
+                                pass
+                    # Long provider pauses go to the daily fallback instead of
+                    # blocking a worker or retrying before the allowed time.
+                    if delay > 60:
+                        r.raise_for_status()
+                time.sleep(delay)
                 continue
             r.raise_for_status()
             return r.json()
@@ -318,7 +337,8 @@ def massive_grouped_daily(date_str: str) -> dict[str, dict[str, float]]:
     holiday/weekend or if no key.  One Massive call covers ~12k tickers.
     """
     try:
-        payload = _massive_get(f"/v2/aggs/grouped/locale/us/market/stocks/{date_str}", adjusted="true")
+        # Daily cache is raw OHLCV. Bulk and per-symbol requests must agree.
+        payload = _massive_get(f"/v2/aggs/grouped/locale/us/market/stocks/{date_str}", adjusted="false")
     except Exception as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         reason = f"HTTP {status}" if status else type(exc).__name__
@@ -842,6 +862,17 @@ def get_market_cap_snapshot(symbol: str, refresh: bool = False) -> dict[str, Any
     required_session = most_recent_session().isoformat()
     path = _cache_path("market_cap_by_session", sym)
     cached = _read_json(path)
+    from gildata_shadow_service import cached_equity, reference_enabled, refresh_references
+
+    if reference_enabled():
+        if refresh and external_data_allowed():
+            refresh_references([sym], required_session)
+        sample = cached_equity(sym) or {}
+        cap = float(sample.get("market_cap_usd") or 0)
+        if sample.get("as_of") == required_session and 0 < cap < 1e15:
+            return {"available": True, "market_cap": round(cap), "source": "gildata:FinQuery:cached",
+                    "fetched_at": sample.get("fetched_at"), "refreshed_for_session": required_session,
+                    "data_as_of_date": required_session, "stale": False, "cache_hit": True}
     if isinstance(cached, dict) and cached.get("market_cap") and cached.get("refreshed_for_session") == required_session:
         return {**cached, "available": True, "stale": False, "cache_hit": True}
 
@@ -905,8 +936,9 @@ def _is_us_trading_day(d: date) -> bool:
 
 
 def _us_market_close_utc(d: date) -> datetime:
-    """Return the US regular-session close (16:00 ET) for a given date, as UTC."""
-    local_close = datetime(d.year, d.month, d.day, _US_MARKET_CLOSE_HOUR, _US_MARKET_CLOSE_MINUTE, tzinfo=_US_EASTERN)
+    """Return the scheduled cash-equity close for a given date, as UTC."""
+    from market_calendar import session_close_et
+    local_close = session_close_et(d)
     return local_close.astimezone(timezone.utc)
 
 
@@ -928,13 +960,6 @@ def get_latest_us_market_close_utc(now: datetime | None = None) -> datetime:
     try:
         from market_calendar import is_trading_day, most_recent_session
 
-        before_close = (now_et.hour < _US_MARKET_CLOSE_HOUR
-                        or (now_et.hour == _US_MARKET_CLOSE_HOUR and now_et.minute < _US_MARKET_CLOSE_MINUTE))
-        today = now_et.date()
-        if is_trading_day(today) and before_close:
-            # Today's session hasn't closed yet -> latest close is the prior session.
-            from market_calendar import previous_trading_day
-            return _us_market_close_utc(previous_trading_day(today))
         return _us_market_close_utc(most_recent_session(now_et))
     except Exception:
         # Fallback: weekday-only rollback (legacy behavior).
@@ -1310,6 +1335,27 @@ def get_earnings_events(symbol: str) -> list[dict[str, Any]]:
 def get_analyst_view(symbol: str) -> dict[str, Any]:
     """Latest analyst rating mix + price-target summary (FMP, 2 cached calls)."""
     out: dict[str, Any] = {"available": False}
+    from gildata_shadow_service import cached_equity, reference_enabled, refresh_references
+    from market_calendar import most_recent_session
+
+    if reference_enabled():
+        session = most_recent_session().isoformat()
+        if external_data_allowed():
+            refresh_references([symbol], session)
+        sample = cached_equity(symbol) or {}
+        if sample.get("as_of") == session and (sample.get("ratings") or sample.get("target_avg_usd") is not None):
+            ratings = sample.get("ratings") or {}
+            out.update(available=True, source="gildata:FinQuery", as_of=session,
+                       rating_scheme="gildata_five_categories", ratings=ratings,
+                       target_avg_usd=sample.get("target_avg_usd"),
+                       target_count=sample.get("target_count"), target_window_days=sample.get("target_window_days"))
+            # Group directional ratings only for the existing statistical display;
+            # retain the provider's five original categories separately.
+            if ratings:
+                out.update(buy=ratings["buy"] + ratings["overweight"], hold=ratings["neutral"],
+                           sell=ratings["sell"] + ratings["underweight"])
+                _annotate_analyst_view(symbol, out)
+            return out
     try:
         grades = _fmp_get("grades-historical", symbol, limit=1) or []
     except Exception:
@@ -1471,6 +1517,8 @@ def get_point_in_time_earnings(symbol: str, as_of: str) -> dict[str, Any] | None
 
 
 def data_source_status() -> dict[str, Any]:
+    from app_database import cache_get
+    from gildata_shadow_service import reference_enabled
     try:
         import cost_model
         cost_assumptions = cost_model.cost_summary()
@@ -1491,6 +1539,25 @@ def data_source_status() -> dict[str, Any]:
         ohlcv_priority.insert(0, "massive_grouped_daily")
     return {
         "ohlcv_priority": ohlcv_priority,
+        "configuration_only": True,
+        "gildata_reference": {
+            "enabled": reference_enabled(),
+            "last_refresh": cache_get("gildata:reference_last_status"),
+            "primary_fields": ["dated_us_market_cap", "five_category_ratings", "100_day_target_mean", "annual_eps_estimates", "daily_vix"],
+            "daily_quote_price_basis": "unspecified_display_only_not_historical_cache",
+            "news": cache_get("gildata:news_validation") or {"status": "not_verified"},
+            "research_enrichment": cache_get("gildata:research_last_status"),
+            "news_supplement": cache_get("gildata:news_supplement_last_status"),
+            "limitations": ["PE may be missing", "annual EPS is not next-quarter earnings", "news exact-date/symbol/provenance not verified", "no option quotes verified"],
+        },
+        "daily_cache_price_basis": "raw_unadjusted",
+        "price_basis_note": "后续日线补洞统一使用原始价；既有历史缓存尚未逐笔核验。已配置密钥不等于授权有效或当前可用。",
+        "provider_configuration": {
+            name: "configured_unprobed" if os.environ.get(key, "").strip() else "not_configured"
+            for name, key in {"massive": "MASSIVE_API_KEY", "tiingo": "TIINGO_API_KEY",
+                              "twelvedata": "TWELVE_DATA_API_KEY", "fmp": "FMP_API_KEY",
+                              "databento": "DATABENTO_API_KEY"}.items()
+        },
         "fundamentals_priority": ["massive_financials", "fmp", "cache", "yfinance"] if massive_configured else ["fmp", "cache", "yfinance"],
         "options_priority": ["massive", "cboe", "yfinance"],
         "twelvedata_configured": bool(os.environ.get("TWELVE_DATA_API_KEY", "").strip()),

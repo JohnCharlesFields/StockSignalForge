@@ -189,7 +189,19 @@ def get_vix_regime(force_refresh: bool = False) -> dict[str, Any]:
     real_source = None
     data_as_of_date: str | None = None
 
-    if external_data_allowed():
+    from gildata_shadow_service import reference_enabled, refresh_vix
+    if reference_enabled():
+        from market_calendar import most_recent_session
+        dated_vix = refresh_vix(most_recent_session().isoformat())
+        if dated_vix:
+            value = round(float(dated_vix["value"]), 2)
+            source = "gildata:VIX_daily:cached"
+            source_type = "real_vix"
+            real_source = source
+            data_as_of_date = dated_vix["as_of"]
+            warnings.append("聚源 VIX 为已完成交易日的日收盘，非盘中实时 VIX。")
+
+    if value is None and external_data_allowed():
         cboe_vix = get_cboe_vix_latest("VIX")
         if cboe_vix.get("available") and cboe_vix.get("value"):
             value = round(float(cboe_vix["value"]), 2)
@@ -199,7 +211,7 @@ def get_vix_regime(force_refresh: bool = False) -> dict[str, Any]:
             data_as_of_date = str(cboe_vix.get("as_of_date") or "") or None
         else:
             warnings.append(f"CBOE VIX unavailable: {cboe_vix.get('reason') or 'unknown'}")
-    else:
+    elif value is None:
         warnings.append("page_read_cache_only: skip CBOE VIX fetch")
 
     if value is None:

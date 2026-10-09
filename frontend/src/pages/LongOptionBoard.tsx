@@ -3,6 +3,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, Loader2, RefreshCw, Sparkles 
 import { toast } from "sonner";
 import { api, type LongOptionReview, type LongOptionScreenJob, type LongOptionScreenResponse, type LongOptionScreenRow, type LongOptionShadowScorecard, type PriorityBoardResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { GildataEvidencePanel } from "@/components/GildataEvidence";
 
 const STATUS: Record<string, string> = {
   signal: "方向信号", no_direction: "方向不明", missing_daily_history: "正股日线不足",
@@ -68,6 +69,7 @@ function SignalDetails({ row }: { row: LongOptionScreenRow }) {
       <p className="font-semibold">模型 {review.model_view === "WAIT" ? "建议观望" : review.model_view === "CALL" ? "偏向 Call" : "偏向 Put"} · 综合 {review.final_view === "WAIT" ? "观望" : review.final_view === "CALL" ? "研究 Call" : "研究 Put"}</p>
       {review.conflict && <p className="text-amber-700 dark:text-amber-300">模型与规则方向冲突，综合结论降级为观望。</p>}
       <p>{review.summary}</p>
+      <GildataEvidencePanel evidence={review.reference_evidence} marketDate={row.stock_data_as_of} />
       {review.supporting_points?.length ? <p>支持：{review.supporting_points.join("；")}</p> : null}
       {review.objections?.length ? <p className="text-amber-700 dark:text-amber-300">反对：{review.objections.join("；")}</p> : null}
       {review.watch_condition && <p>确认条件：{review.watch_condition}</p>}

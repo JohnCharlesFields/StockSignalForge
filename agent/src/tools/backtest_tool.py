@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from src.agent.progress import emit_progress
 from src.agent.tools import BaseTool
 from src.core.runner import Runner
 from src.tools.path_utils import safe_run_dir
+from src.tools.backtest_summary import build_backtest_summary
+
+logger = logging.getLogger(__name__)
 
 
 def run_backtest(run_dir: str) -> str:
@@ -64,14 +68,21 @@ def run_backtest(run_dir: str) -> str:
 
     emit_progress("finalize", message="collecting artifacts")
     artifacts_found = {name: str(path) for name, path in result.artifacts.items()}
-    return json.dumps({
+    payload = {
         "status": "ok" if result.success else "error",
         "exit_code": result.exit_code,
         "stdout": result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
         "stderr": result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr,
         "artifacts": artifacts_found,
         "run_dir": run_dir,
-    }, ensure_ascii=False)
+    }
+    if result.success:
+        try:
+            payload["summary"] = build_backtest_summary(run_path)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Backtest succeeded but summary unavailable: %s", exc)
+            payload["summary_warning"] = str(exc)
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False)
 
 
 class BacktestTool(BaseTool):

@@ -35,7 +35,7 @@ class PriorityFreshnessTests(unittest.TestCase):
     def test_forward_ledger_uses_completed_market_session(self) -> None:
         prediction_rows = []
         slice_dates = []
-        board = {"picks": [{"symbol": "NVDA", "current_price": 100.0, "calibrated_probability": 0.55}], "horizon_days": 5}
+        board = {"data_as_of": "2026-09-22", "picks": [{"symbol": "NVDA", "price_as_of": "2026-09-22", "current_price": 100.0, "calibrated_probability": 0.55}], "horizon_days": 5}
 
         def log_many(rows):
             prediction_rows.extend(rows)

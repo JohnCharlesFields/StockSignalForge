@@ -41,8 +41,9 @@ from app_database import (
 from market_data_service import download_daily_history, get_daily_history, get_next_earnings
 from signal_calibration import calibrate
 from iv_signal_service import iv_features
+from pullback_parameter_service import ranking_settings
 
-CACHE_KEY = "priority_board:v22"
+CACHE_KEY = "priority_board:v23"
 MAX_SCORED_CANDIDATES = 200
 # Relative-strength conviction gate (2026-06-30 conditioning backtest). Default
 # on; set PRIORITY_RS_CONVICTION_GATE=0 to revert to calibrated-prob-only order.
@@ -121,13 +122,15 @@ def _rs_conviction(rel_strength: Optional[float]):
     it is demoted (not excluded). Depth (long pinned below EMA) is NOT gated -- it
     is where the edge concentrates. Returns (multiplier, state)."""
     rs = _finite(rel_strength, 0.0)
+    config = ranking_settings()
+    strong, weak, floor = config["rs_full_threshold"], config["rs_weak_threshold"], config["rs_weak_multiplier"]
     if not _RS_GATE:
         return 1.0, "off"
-    if rs >= 0.0:
+    if rs >= strong:
         return 1.0, "leader"
-    if rs <= -0.02:
-        return 0.6, "laggard"
-    return 0.6 + 0.4 * ((rs + 0.02) / 0.02), "neutral"
+    if rs <= weak:
+        return floor, "laggard"
+    return floor + (1 - floor) * ((rs - weak) / (strong - weak)), "neutral"
 
 
 def _board_from_latest_slices(limit: int = 8) -> Optional[Dict[str, Any]]:
@@ -807,7 +810,7 @@ WIN_RATE_EXPLAINER = (
 WIN_RATE_EXPLAINER = (
     "这里的「校准胜率」不是单纯涨跌概率，也不是保证赚钱概率；它表示："
     "按历史校准曲线，信号出现后未来 N 个交易日，扣除交易成本后，跑赢这只股票自身长期基线表现的概率。"
-    "50% 约等于和自身基线持平，>50% 才代表模型认为存在正超额。"
+    "命中概率与平均期望收益是不同指标；概率超过50%不保证期望净收益为正。"
     "当前主胜率只来自 pullback_hv 主信号，也就是「回调错杀 + 波动放大」的历史校准；"
     "市场+流动性+RS前40% 与强于行业ETF目前只是软增强标签，只参与同档位排序微调和前向对账，不会改写这个胜率。"
 )
@@ -878,7 +881,9 @@ def _pullback_hv_score(launch: float, hv_rise: Optional[float]) -> float:
     """
     launch_norm = min(1.0, max(0.0, _finite(launch)))
     hv_norm = 0.5 if hv_rise is None else min(1.0, max(0.0, 0.5 + 0.5 * _finite(hv_rise)))
-    return min(1.0, max(0.0, 0.5 * (1.0 - launch_norm) + 0.5 * hv_norm))
+    config = ranking_settings()
+    a, b = config["oversold_weight"], config["volatility_weight"]
+    return min(1.0, max(0.0, (a * (1.0 - launch_norm) + b * hv_norm) / (a + b)))
 
 
 def _options_sentiment(row: Dict[str, Any]) -> Dict[str, str]:
@@ -1065,6 +1070,7 @@ def _score_candidates(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
                 "launch": _finite(scored.get("launch_score")),
                 "tunnel": _finite((scored.get("daily_tunnel") or {}).get("score")),
                 "last_price": _finite(scored.get("last_price")),
+                "price_as_of": close.index[-1].date().isoformat() if len(close) else None,
                 "stock_ret_20": stock_ret_20,
                 "stock_ret_63": stock_ret_63,
                 "stock_ret_126": stock_ret_126,
@@ -1191,12 +1197,13 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
         rs_conviction, rs_state = _rs_conviction(rel_strength)
         # conviction_score is the ranking key: validated win-rate gated by RS.
         conviction_score = calibrated_prob * rs_conviction
-        rs_nudge = 0.05 * (rs_norm - 0.5)  # tiny within-tier resolution only
+        rs_nudge = ranking_settings()["relative_strength_nudge"] * (rs_norm - 0.5)
         priority = (conviction_score + rs_nudge) * (0.6 + 0.4 * regime)
 
         picks.append({
             "symbol": symbol,
             "current_price": _finite(current_price),
+            "price_as_of": sc.get("price_as_of") if sc else None,
             "priority_score": round(priority, 4),
             "conviction_score": round(conviction_score, 4),
             "rs_conviction": round(rs_conviction, 3),
@@ -1254,9 +1261,9 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
         e = p.get("playbook_enhancements") or {}
         nudge = 0.0
         if e.get("market_liquid_rs_top40"):
-            nudge += 0.012
+            nudge += ranking_settings()["market_tag_nudge"]
         if e.get("stock_stronger_than_industry"):
-            nudge += 0.006
+            nudge += ranking_settings()["sector_tag_nudge"]
         p["soft_enhancement_nudge"] = round(nudge, 4)
         p["ranking_score"] = round(_finite(p.get("priority_score")) + nudge, 4)
     picks[:MAX_CACHED_PICKS] = sorted(
@@ -1267,6 +1274,13 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
         ),
         reverse=True,
     )
+    from pullback_parameter_service import ACTIVE_KEY, predict_pick
+    active_parameters = cache_get(ACTIVE_KEY)
+    if isinstance(active_parameters, dict) and active_parameters.get("eligible_for_activation") and not active_parameters.get("rejection_reasons"):
+        for p in picks:
+            p["parameter_research"] = predict_pick(p, active_parameters)
+        picks.sort(key=lambda p: (bool((p.get("parameter_research") or {}).get("entry_candidate")),
+                                 (p.get("parameter_research") or {}).get("expected_net_return", -1), p["ranking_score"]), reverse=True)
     # Compact 舆情 tag for the displayed slice (label + net + Trump flag); cached
     # per-symbol 2h so this only costs news calls on the daily batch / cache miss.
     try:
@@ -1285,6 +1299,7 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
             p["earnings"] = _earnings_brief(p["symbol"])
     top_win = picks[0]["calibrated_probability"] if picks else 0.0
     result = {
+        "parameter_version": (active_parameters or {}).get("parameter_version", ranking_settings()["version"]),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         **_board_freshness((snapshot.get("payload") or {}).get("data_as_of") or cache_get("market_calendar:last_synced_session")),
         "snapshot_id": snapshot.get("snapshot_id"),

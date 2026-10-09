@@ -920,6 +920,7 @@ def _start_premarket_news_auto_refresh() -> None:
                         "written": result.get("written"),
                         "universe_symbol_count": result.get("universe_symbol_count"),
                         "window": result.get("window"),
+                        "source_audit": result.get("source_audit"),
                     },
                 })
             except Exception as exc:
@@ -7021,7 +7022,7 @@ def _single_inferred_upstream_suppliers(profile: Dict[str, Any], facts: Dict[str
 
 def _single_profile_research_overlay(symbol: str, profile: Dict[str, Any]) -> Dict[str, Any]:
     """Attach dated display data without altering the cached qualitative profile."""
-    from gildata_shadow_service import cached_equity
+    from gildata_shadow_service import cached_equity, cached_research
     from market_calendar import most_recent_session
     from market_data_service import get_market_cap_snapshot
 
@@ -7052,7 +7053,24 @@ def _single_profile_research_overlay(symbol: str, profile: Dict[str, Any]) -> Di
             "pe": shadow.get("pe"),
             "pb": shadow.get("pb"),
             "ps": shadow.get("ps"),
+            "annual_eps_estimates": shadow.get("annual_eps_estimates") or [],
+            "daily_quote": shadow.get("daily_quote"),
         }
+        if shadow["as_of"] == session:
+            for name in ("pe", "pb", "ps"):
+                if shadow.get(name) is not None:
+                    out["facts"][name] = shadow[name]
+    evidence = cached_research(symbol)
+    if evidence:
+        out.setdefault("gildata_research", {})["evidence"] = evidence
+        company = evidence.get("company") or {}
+        for dest, source in (("name", "name"), ("country", "country"), ("website", "website"),
+                             ("business_summary_en", "business_en")):
+            if company.get(source):
+                out["facts"][dest] = company[source]
+        if company.get("business_cn"):
+            out["vendor_business_cn"] = company["business_cn"]
+        out["available"] = out.get("available") or bool(company)
     return out
 
 
@@ -7093,8 +7111,16 @@ def _single_company_profile(symbol: str) -> Dict[str, Any]:
         return _single_profile_research_overlay(sym, {**cached, "cache_hit": True})
 
     if not external_data_allowed():
+        from gildata_shadow_service import cached_equity, cached_research
+        sample = cached_equity(sym)
+        if (sample and sample.get("available_fields")) or cached_research(sym):
+            return _single_profile_research_overlay(sym, {
+                "available": True, "status": "reference_only", "symbol": sym,
+                "facts": {"name": sym}, "ai_available": False,
+            })
         return {"available": False, "status": "loading", "symbol": sym}
     facts = _single_enrich_company_facts(sym, _single_company_facts(sym))
+    facts = _single_profile_research_overlay(sym, {"facts": facts}).get("facts", facts)
     # Prefer FMP real fundamentals for the structured facts when available.
     try:
         if not external_data_allowed():
@@ -7283,6 +7309,13 @@ def _warm_single_stock_enrichment(symbol: str, current_price: Optional[float], h
     the 'done' marker (otherwise the frontend polls forever)."""
     sym = str(symbol or "").upper()
     iv_key = f"single_stock_iv:v8:{sym}"
+    def _warm_research():
+        from gildata_shadow_service import refresh_research
+        from market_calendar import most_recent_session
+        with external_data_scope(True):
+            return refresh_research([sym], most_recent_session().isoformat())
+
+    research_future = _SSO_ENRICH_POOL.submit(_warm_research)
     try:
         with external_data_scope(True):
             prof = _single_company_profile(sym)  # LLM-backed; ~20s on a cold symbol
@@ -7295,7 +7328,7 @@ def _warm_single_stock_enrichment(symbol: str, current_price: Optional[float], h
             with external_data_scope(True):
                 _single_option_iv(sym, current_price, hv20)
 
-        for fut in (_SSO_ENRICH_POOL.submit(_warm_leader), _SSO_ENRICH_POOL.submit(_warm_iv)):
+        for fut in (_SSO_ENRICH_POOL.submit(_warm_leader), _SSO_ENRICH_POOL.submit(_warm_iv), research_future):
             try:
                 fut.result(timeout=30)
             except Exception as exc:
@@ -8274,6 +8307,7 @@ async def get_prediction_scorecard(
     force: bool = Query(False),
     board_only: bool = Query(False),
     mode: str = Query("live"),
+    evaluation_version: str = Query("legacy", pattern="^(legacy|recorded_open_v3)$"),
 ):
     """Forward-verification track record: predicted vs realized + scoring.
 
@@ -8290,7 +8324,7 @@ async def get_prediction_scorecard(
 
     def _scoped():
         with external_data_scope(False):
-            return prediction_scorecard(force=force, board_only=board_only, mode=mode_arg)
+            return prediction_scorecard(force=force, board_only=board_only, mode=mode_arg, evaluation_version=evaluation_version)
 
     return _json_safe(await asyncio.to_thread(_scoped))
 
@@ -9162,14 +9196,32 @@ def _daily_databento_gap_repair(session):
                 settle(0.0)
                 return {"ok": False, "error": "Databento price repair exceeds configured cost cap",
                         "estimated_cost_usd": float(cost_error.group(1)), "max_cost_usd": cap}
-            return {"ok": False, "error": "Databento gap repair unavailable or cost cap exceeded",
-                    "return_code": result.returncode, "max_cost_usd": cap}
+            diagnostics = []
+            for line in (result.stderr or "").splitlines():
+                try:
+                    item = json.loads(line)
+                    if isinstance(item, dict) and item.get("phase"):
+                        diagnostics.append(item)
+                except (ValueError, TypeError):
+                    pass
+            detail = diagnostics[-1] if diagnostics else {}
+            if detail.get("phase") == "cost_estimate" and detail.get("download_started") is False:
+                settle(0.0)
+            failure = {"ok": False, "error": detail.get("repair_error") or "Databento gap repair failed",
+                       "phase": detail.get("phase", "unknown"), "return_code": result.returncode,
+                       "budget_reservation_retained": detail.get("download_started") is not False,
+                       "max_cost_usd": cap, "session": session}
+            cache_set("daily_three_layer_auto:price_repair_last_error", failure)
+            return failure
         report = json.loads(result.stdout)
         settle(max(0.0, float(report.get("estimated_cost_usd") or 0)))
         return {"ok": True, "symbols_filled": report.get("symbols_filled", 0),
                 "estimated_cost_usd": report.get("estimated_cost_usd"), "max_cost_usd": cap}
     except Exception as exc:
-        return {"ok": False, "error": type(exc).__name__}
+        failure = {"ok": False, "error": type(exc).__name__, "session": session,
+                   "phase": "unknown", "budget_reservation_retained": True}
+        cache_set("daily_three_layer_auto:price_repair_last_error", failure)
+        return failure
 
 
 def _daily_post_scan_finalize(universe_ids: Optional[List[str]]) -> Dict[str, Any]:
@@ -9216,6 +9268,8 @@ def _daily_post_scan_finalize_impl(universe_ids, out):
         board = _timed("board_build", lambda: compute_priority_board(limit=MAX_CACHED_PICKS, force_refresh=True))
         if not board.get("picks"):
             raise RuntimeError("priority board has no candidates; daily ledger was not updated")
+        if board.get("data_as_of") != session:
+            raise RuntimeError("priority board date differs from current session; refusing to relabel old predictions")
         from prediction_ledger_service import log_predictions
         ledger = _timed("predictions_log", lambda: log_predictions(30, as_of_date=session))
         out["prediction_ledger"] = ledger
@@ -9257,6 +9311,20 @@ def _daily_update_optional_evidence() -> None:
         if not symbols:
             result.update(status="unavailable", event_status="unknown", llm_status="skipped")
             return
+        # Optional reference enrichment is isolated and bounded. It must not
+        # invalidate the completed candidate ledger or change historical bars.
+        try:
+            import sys
+            from gildata_shadow_service import reference_enabled
+            if reference_enabled():
+                proc = subprocess.run(
+                    [sys.executable, "-m", "scripts.refresh_gildata_references"], cwd=str(AGENT_DIR),
+                    input=json.dumps({"symbols": list(dict.fromkeys(r["symbol"] for r in rows if r.get("symbol")))}),
+                    capture_output=True, text=True, timeout=180,
+                )
+                result["gildata_reference"] = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.returncode == 0 else {"status": "unavailable"}
+        except Exception as exc:
+            result["gildata_reference"] = {"status": "partial", "error_type": type(exc).__name__}
         try:
             _run_event_driven_scan_sync(EventDrivenScanRequest(
                 universe="daily_unified", tickers=symbols, top=len(symbols),
@@ -9756,6 +9824,35 @@ def _daily_three_layer_auto_loop() -> None:
 async def _start_daily_three_layer_auto_scheduler() -> None:
     """Start the in-container daily three-layer scanner."""
     threading.Thread(target=_daily_three_layer_auto_loop, daemon=True).start()
+    threading.Thread(target=_pullback_training_loop, daemon=True, name="pullback-training-scheduler").start()
+
+
+def _pullback_training_loop():
+    from pullback_parameter_service import maybe_start_training
+    time.sleep(90)
+    while True:
+        try:
+            with _AUTO_SCAN_LOCK:
+                scanning = _AUTO_SCAN_JOB.get("status") in {"running", "queued"}
+            if not scanning and not _daily_active_worker_ids():
+                maybe_start_training()
+        except Exception as exc:
+            console.log(f"pullback parameter scheduler: {type(exc).__name__}")
+        time.sleep(300)
+
+
+@app.get("/pullback-parameters/status", dependencies=[Depends(require_auth)])
+async def get_pullback_parameter_status():
+    from pullback_parameter_service import status
+    return status()
+
+
+@app.post("/pullback-parameters/train", dependencies=[Depends(require_auth)])
+async def train_pullback_parameters():
+    if _AUTO_SCAN_JOB.get("status") in {"running", "queued"} or _daily_active_worker_ids():
+        return {"status": "deferred", "reason": "daily_scan_running"}
+    from pullback_parameter_service import maybe_start_training
+    return maybe_start_training(force=True)
 
 
 def _signal_oos_loop() -> None:
@@ -11167,7 +11264,8 @@ async def premarket_news_source_audit():
 @app.get("/premarket-news/auto-status", dependencies=[Depends(require_auth)])
 async def premarket_news_auto_status():
     """Status of the 15-minute background news refresher."""
-    return dict(_PREMARKET_NEWS_AUTO_STATUS)
+    return {**_PREMARKET_NEWS_AUTO_STATUS, "gildata_news": cache_get("gildata:news_validation"),
+            "gildata_supplement": cache_get("gildata:news_supplement_last_status")}
 
 
 @app.post("/premarket-news/refresh", dependencies=[Depends(require_auth)])

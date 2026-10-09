@@ -15,7 +15,7 @@ flowchart LR
     H --> I[回测与结果复核]
 ```
 
-适配代码位于 `agent/gildata_shadow_service.py`，查询脚本为 `agent/scripts/probe_gildata_shadow.py`。支持市值、估值、目标价、评级，以及按日期读取的可选 VIX 缓存；可用字段取决于服务返回内容。
+适配代码位于 `agent/gildata_shadow_service.py`，查询脚本为 `agent/scripts/probe_gildata_shadow.py`；工具目录与有限美股类别采样使用`agent/scripts/probe_gildata_us_catalog.py`。支持同日期市值、原始五档评级、目标价、年度EPS、公司简介与分类、EPS/营收修正及分歧，以及可选日VIX；可用字段取决于实际返回，PE可能缺失。
 
 ## 配置
 
@@ -26,9 +26,13 @@ GILDATA_MCP_URL=
 GILDATA_MCP_TOKEN=
 # 仅在需要时启用按日期匹配的缓存 VIX 回退
 GILDATA_VIX_FALLBACK=0
+# 以下为可选后台刷新，默认关闭；不激活新因子
+GILDATA_REFERENCE_PRIMARY=0
+GILDATA_RESEARCH_ENABLED=0
+GILDATA_NEWS_SUPPLEMENT=0
 ```
 
-MCP 地址须为 HTTPS。服务地址、token 和授权请通过 [恒生聚源数据地图](https://www.gildata.com/products/datamap) 自行获取。公开版本没有预置服务地址或 token，不应在 GitHub 提交自己的 agent/.env、带认证的 URL 或 MCP 客户端私有配置。
+MCP 地址须为HTTPS且不含用户名、密码、查询参数或片段。服务地址、token和授权请通过 [恒生聚源数据地图](https://www.gildata.com/products/datamap) 自行获取，token单独配置。公开版本没有预置服务地址或token，不应在GitHub提交自己的agent/.env、带认证URL或MCP客户端私有配置。
 
 在后端 Python 环境中，从仓库根目录执行查询：
 
@@ -36,7 +40,15 @@ MCP 地址须为 HTTPS。服务地址、token 和授权请通过 [恒生聚源�
 python agent/scripts/probe_gildata_shadow.py --as-of YYYY-MM-DD --symbols AAPL MSFT
 ```
 
-日期应填写真实的市场交易日。探测一次最多五只股票，会调用外部 MCP 服务；费用按自己的服务授权计。返回样本会写入运行环境的私有缓存，普通页面读取使用已验证缓存，不会自动调用该脚本。
+日期填写真实市场交易日；探针会请求外部MCP，费用按自己的授权计。正常页面读取缓存；个股已有后台富集、日批可选证据、15分钟新闻循环在启用上述开关后才补齐数据。日批按5标的分组并轮转，父进程180秒预算；新闻每轮最多美联储+2公司，单请求12秒读超时一次尝试。服务失败不清空有效缓存，也不保证每天覆盖全部股票。
+
+## 证据与新闻边界
+
+- 原SQLite新增`reference_evidence_snapshots`，按内容版本追加，不改写同内容首次采集时间。报告期、数据截止日、采集时间分别保留；首次没有可比前值时不计算预期变化。
+- EPS/营收均值、上修下修次数和分歧只能作为研究证据。修正次数不是独立机构投票，更不是上涨概率。公司分类不自动取代细分同行规则。
+- 中文新闻按标题实体、日期和市场筛选后进入原队列。无可核验原文链接或时区时明确标注；未知时区用首次接收时间排队并保留供应商原始时间。
+- 聚源摘要显示“待研判”，预计开盘涨幅/带宽为空，不因为“上调通胀”等关键词判成利多。已有原文和勾选不覆盖，新闻仍是补充源而非原始媒体替代。
+- DeepSeek读取缓存证据并继续遵守原规则；不改变概率/排名。新归档未经PIT认证，不直接用于历史回测或校准；分钟、真实期权报价和完整历史成分能力尚未确认，不能承诺提供。
 
 ## 数据与许可
 

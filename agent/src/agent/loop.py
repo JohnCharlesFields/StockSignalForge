@@ -14,6 +14,7 @@ Tool execution:
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import logging
 import os
@@ -52,7 +53,7 @@ TAIL_TOKEN_BUDGET = int(os.getenv("TAIL_TOKEN_BUDGET", "20000"))
 logger = logging.getLogger(__name__)
 
 
-def estimate_tokens(messages: list) -> int:
+def estimate_tokens(messages: list, tools: list | None = None) -> int:
     """Rough token count estimate (~4 chars/token).
 
     Args:
@@ -61,25 +62,38 @@ def estimate_tokens(messages: list) -> int:
     Returns:
         Estimated token count.
     """
-    return len(json.dumps(messages, default=str, ensure_ascii=False)) // 4
+    payload = json.dumps([messages, tools or []], default=str, ensure_ascii=False)
+    # CJK text costs more than the usual four ASCII characters per token.
+    cjk = sum(1 for char in payload if "\u4e00" <= char <= "\u9fff")
+    return (len(payload) - cjk) // 4 + cjk + 256
 
 
-def _microcompact(messages: list) -> None:
+def _microcompact(messages: list, *, budget: int | None = None, tools: list | None = None, protected_ids: set[str] | None = None, result_paths: dict[str, str] | None = None) -> None:
     """Layer 1: silently prune old tool results, keeping the most recent N intact.
 
     Args:
         messages: Message list (mutated in place).
     """
+    budget = TOKEN_THRESHOLD if budget is None else budget
+    protected_ids = protected_ids or set()
+    if estimate_tokens(messages, tools) <= int(budget * 0.8):
+        return
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     if len(tool_msgs) <= KEEP_RECENT:
         return
     for msg in tool_msgs[:-KEEP_RECENT]:
+        if msg.get("tool_call_id") in protected_ids:
+            continue
         content = msg.get("content", "")
         if isinstance(content, str) and len(content) > 100:
-            msg["content"] = "[cleared]"
+            saved_path = (result_paths or {}).get(msg.get("tool_call_id", ""))
+            msg["content"] = json.dumps({"context_compacted": True, "result_path": saved_path,
+                                         "instruction": "Recover with read_file(max_chars=2000, offset_chars=0) and follow next_offset_chars; do not repeat external fetches."}) if saved_path else "[cleared]"
+            if estimate_tokens(messages, tools) <= int(budget * 0.7):
+                break
 
 
-def _context_collapse(messages: list) -> None:
+def _context_collapse(messages: list, *, protected_ids: set[str] | None = None) -> None:
     """Layer 2: fold long text blocks in older messages without LLM call.
 
     Preserves head + tail of large text, collapses the middle.
@@ -91,6 +105,11 @@ def _context_collapse(messages: list) -> None:
     if len(messages) <= COLLAPSE_PRESERVE_RECENT + 1:
         return
     for msg in messages[1:-COLLAPSE_PRESERVE_RECENT]:
+        if msg.get("tool_call_id") in (protected_ids or set()):
+            continue
+        if msg.get("role") == "tool":
+            # Tool JSON is pruned with recoverable references, never sliced into invalid JSON.
+            continue
         content = msg.get("content")
         if not isinstance(content, str) or len(content) <= COLLAPSE_TEXT_MIN:
             continue
@@ -304,6 +323,8 @@ class AgentLoop:
         self._called_ok: set[str] = set()
         self._cancelled: bool = False
         self._previous_summary: str = ""
+        self._pending_tool_ids: set[str] = set()
+        self._tool_result_paths: dict[str, str] = {}
         self._persistent_memory = persistent_memory
 
     def cancel(self) -> None:
@@ -328,6 +349,13 @@ class AgentLoop:
         self._cancelled = False
         self._called_ok = set()
         self._previous_summary = ""
+        self._pending_tool_ids = set()
+        self._tool_result_paths = {}
+        # Keep the existing threshold as an upper bound; reserve provider output
+        # space and cap context cost unless the operator explicitly raises it.
+        context_window = int(os.getenv("VIBE_TRADING_CONTEXT_WINDOW", str(TOKEN_THRESHOLD)))
+        cost_cap = int(os.getenv("VIBE_TRADING_CONTEXT_MAX_TOKENS", "200000"))
+        context_budget = max(1024, min(TOKEN_THRESHOLD, cost_cap, int(context_window * 0.9)))
 
         state_store = RunStateStore()
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -368,19 +396,22 @@ class AgentLoop:
                     messages.append({"role": "user", "content": f"<background-results>\n{notif_text}\n</background-results>"})
                     messages.append({"role": "assistant", "content": "Noted background results."})
 
-                # Layer 1: microcompact (every iteration)
-                _microcompact(messages)
+                tool_definitions = self.registry.get_definitions()
+                # Newly produced evidence gets one successful model request before pruning.
+                _microcompact(messages, budget=context_budget, tools=tool_definitions, protected_ids=self._pending_tool_ids, result_paths=self._tool_result_paths)
 
                 # Layer 2: context collapse (fold long text, zero API cost)
-                tokens = estimate_tokens(messages)
-                if tokens > COLLAPSE_THRESHOLD:
-                    _context_collapse(messages)
-                    tokens = estimate_tokens(messages)
+                tokens = estimate_tokens(messages, tool_definitions)
+                if tokens > min(COLLAPSE_THRESHOLD, int(context_budget * 0.9)):
+                    _context_collapse(messages, protected_ids=self._pending_tool_ids)
+                    tokens = estimate_tokens(messages, tool_definitions)
 
                 # Layer 3: auto_compact (token threshold exceeded)
-                if tokens > TOKEN_THRESHOLD:
-                    logger.info(f"Auto compact triggered: {tokens} tokens > {TOKEN_THRESHOLD}")
+                if tokens > context_budget:
+                    logger.info(f"Auto compact triggered: {tokens} tokens > {context_budget}")
                     self._auto_compact(messages, run_dir, trace)
+                trace.write({"type": "context_budget", "iter": iteration, "estimated_input_tokens": estimate_tokens(messages, tool_definitions),
+                             "budget_tokens": context_budget, "protected_results": len(self._pending_tool_ids)})
 
                 logger.info(f"ReAct iteration {iteration}/{self.max_iterations}")
 
@@ -393,9 +424,12 @@ class AgentLoop:
 
                 response = self.llm.stream_chat(
                     messages,
-                    tools=self.registry.get_definitions(),
+                    tools=tool_definitions,
                     on_text_chunk=_on_text_chunk,
                 )
+                self._pending_tool_ids.clear()
+                if getattr(response, "usage_metadata", None):
+                    trace.write({"type": "model_usage", "iter": iteration, "usage": response.usage_metadata})
 
                 thinking_text = "".join(thinking_chunks)
                 if thinking_text:
@@ -731,8 +765,25 @@ class AgentLoop:
             self._called_ok.add(tc.name)
 
         status = "ok" if success else "error"
-        truncated = result[:TOOL_RESULT_LIMIT]
+        truncated = result
+        result_file = None
+        if self.memory.run_dir:
+            try:
+                result_dir = Path(self.memory.run_dir) / "logs" / "tool_results"
+                result_dir.mkdir(parents=True, exist_ok=True)
+                saved_file = result_dir / (hashlib.sha256(str(tc.id).encode()).hexdigest()[:24] + ".json")
+                saved_file.write_text(result, encoding="utf-8")
+                result_file = saved_file
+                self._tool_result_paths[tc.id] = str(result_file)
+            except OSError:
+                logger.exception("Could not persist full tool evidence for %s", tc.name)
+        if len(result) > TOOL_RESULT_LIMIT:
+            # Keep valid JSON in context; the full evidence remains on disk.
+            truncated = json.dumps({"status": status, "truncated": True, "result_path": str(result_file) if result_file else None,
+                                    "original_chars": len(result), "preview": result[:max(0, TOOL_RESULT_LIMIT // 3)],
+                                    "instruction": "Read saved evidence with read_file(max_chars=2000, offset_chars=0), follow next_offset_chars. Use read_run_artifact for engine CSVs." if result_file else "Full evidence persistence failed; do not infer metrics from the incomplete preview."}, ensure_ascii=False)
         messages.append(context.format_tool_result(tc.id, tc.name, truncated))
+        self._pending_tool_ids.add(tc.id)
 
         trace.write({"type": "tool_result", "iter": iteration, "tool": tc.name, "status": status, "elapsed_ms": elapsed_ms, "preview": result[:200]})
         react_trace.append({"type": "tool_call", "tool": tc.name, "result_preview": result[:200]})
@@ -782,13 +833,18 @@ class AgentLoop:
         while 0 < cut_idx < len(body) and body[cut_idx].get("role") == "tool":
             cut_idx += 1
 
+        pending_boundary = next((i for i, msg in enumerate(body) if any(
+            call.get("id") in self._pending_tool_ids for call in msg.get("tool_calls", [])
+        )), len(body))
+        cut_idx = min(cut_idx, pending_boundary)
+
         head = body[:cut_idx]
         tail = body[cut_idx:]
 
         if not head:
             # All body fits in tail budget — force a split to avoid infinite loop
-            if len(body) > 2:
-                cut_idx = max(1, len(body) // 2)
+            if len(body) > 2 and pending_boundary > 0:
+                cut_idx = min(max(1, len(body) // 2), pending_boundary)
                 head = body[:cut_idx]
                 tail = body[cut_idx:]
             else:

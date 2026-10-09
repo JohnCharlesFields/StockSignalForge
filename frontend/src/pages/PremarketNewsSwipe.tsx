@@ -18,6 +18,7 @@ const compactDate = (value?: string | null) => {
 };
 
 const sentimentLabel = (value?: string) => {
+  if (value === "unreviewed") return "待研判";
   if (value === "positive") return "正面";
   if (value === "negative") return "负面";
   return "中性";
@@ -66,6 +67,8 @@ function StatusLine({ status }: { status: PremarketNewsAutoStatus | null }) {
       {status.last_success_at ? ` · 上次成功 ${compactDate(status.last_success_at)}` : ""}
       {status.last_result?.matched_item_count !== undefined ? ` · 命中 ${status.last_result.matched_item_count}` : ""}
       {failed && status.last_error ? ` · ${status.last_error.split(":")[0]}` : ""}
+      {status.last_result?.source_audit?.yahoo?.failures?.length ? " · Yahoo 补充源部分失败" : ""}
+      {status.gildata_supplement?.accepted ? ` · 聚源补充 ${status.gildata_supplement.accepted} 条` : status.gildata_news?.status === "not_eligible_for_replacement" ? " · 聚源未替换原文源" : ""}
     </div>
   );
 }
@@ -130,8 +133,9 @@ function NewsCard({ item, index, total }: { item: PremarketNewsItem; index: numb
               </div>
             )}
             <div className="mt-3 text-sm text-muted-foreground">
-              {item.publisher || "Unknown"} · {compactDate(item.published_utc)} · 来源 {item.source || "massive:news"}
+              {item.publisher || "Unknown"} · {item.source_provenance?.reported_time || compactDate(item.published_utc)} · 来源 {item.source || "massive:news"}
             </div>
+            {item.source_provenance?.note && <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{item.source_provenance.note}</p>}
             {poolHint && <div className="mt-1 text-xs text-muted-foreground">来源池：{poolHint}</div>}
             {!isMarket && priceMissing && (
               <div className="mt-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
@@ -174,7 +178,7 @@ function NewsCard({ item, index, total }: { item: PremarketNewsItem; index: numb
           </div>
 
           <details className="rounded-lg border bg-muted/20 p-4">
-            <summary className="cursor-pointer text-sm font-medium text-muted-foreground">英文原文与出处</summary>
+            <summary className="cursor-pointer text-sm font-medium text-muted-foreground">{item.source === "gildata:news" ? "聚源资讯片段与出处" : "英文原文与出处"}</summary>
             <div className="mt-3 space-y-3 text-sm leading-6">
               <p className="font-semibold text-foreground">{item.title_original}</p>
               {item.description_original && <p className="text-muted-foreground">{item.description_original}</p>}
@@ -233,6 +237,7 @@ export function PremarketNewsSwipe() {
   const [error, setError] = useState("");
   const [status, setStatus] = useState<PremarketNewsAutoStatus | null>(null);
   const [latestNewsAt, setLatestNewsAt] = useState<string | null>(null);
+  const [sourceWarning, setSourceWarning] = useState("");
 
   const current = items[active];
   const resumeNewsId = searchParams.get("resume");
@@ -245,6 +250,7 @@ export function PremarketNewsSwipe() {
         api.getPremarketNewsAutoStatus().catch(() => null),
       ]);
       setItems(queue.items || []);
+      setSourceWarning(queue.source_mix_warning || "");
       setStatus(auto);
       setLatestNewsAt(queue.latest_update?.latest_news || null);
       setActive((prev) => {
@@ -365,6 +371,12 @@ export function PremarketNewsSwipe() {
       </header>
 
       <main className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-4">
+        {sourceWarning && (
+          <div role="status" className="mx-auto mb-3 flex w-full max-w-5xl items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{sourceWarning}</span>
+          </div>
+        )}
         {error && (
           <div className="mx-auto mb-3 flex w-full max-w-5xl items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-700 dark:text-rose-300">
             <AlertTriangle className="mt-0.5 h-4 w-4" />
