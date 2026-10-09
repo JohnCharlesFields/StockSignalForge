@@ -27,6 +27,7 @@ This release publishes completed October 8 changes and October 9 branding/docs.
 - Clarified research probabilities vs forward results, data dates vs collection times, annual vs quarterly estimates, and incomplete source provenance.
 
 ### Fixed
+- Move CI runner-temporary cache configuration from job environment to step environment; the previous workflow was rejected before any test job could start. Keep full-suite execution rather than hiding test failures.
 - Respect provider Retry-After and count retry requests against quota; retain ambiguous cost reservations while releasing confirmed pre-download failures.
 - Reject old board dates for new prediction logging; align future daily gap repair to raw-price cache basis without claiming old caches are audited.
 - Prevent partial/late reference refreshes overwriting valid newer evidence; preserve news source links and feedback.
