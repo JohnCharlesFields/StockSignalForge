@@ -7,11 +7,26 @@
 - 公开版无默认MCP服务地址；必须填写私有HTTPS地址及独立token，地址含认证信息/查询参数/片段时在发请求前拒绝。特性开关默认关闭。训练数据路径为私有占位，`training_enabled=false`、`auto_activate=false`；数据自行准备后再启用。
 - 保留原SQLite文件名与环境变量，不因品牌改名切换数据库。运行数据、校准曲线、训练样本、供应商返回样本、浏览器Cookies和个人交接日志不发布。
 - 对1493份候选公开文件检查敏感文件路径、10个本地私有值与token/认证URL模式，无真实命中；扫描不打印秘密值。虚构的`.invalid`测试URL及上游`xxxxx`隧道示例为明确例外，不跳过整文件。最终提交前重复检查。
-- 本次公开版在禁网独立容器中：178项聚源/数据库/预期/新闻/DeepSeek缓存/参数与日批测试、92项账户统计/因子/日期完整性测试通过，合计 **270项、另17个子测试**。另增加公开配置/品牌/数据库兼容/CI作用域4项回归。前端TypeScript/Vite生产构建通过。不是全仓套件通过声明。
+- 本次公开版在禁网独立容器中：178项聚源/数据库/预期/新闻/DeepSeek缓存/参数与日批测试、92项账户统计/因子/日期完整性测试通过，合计270项、另17个子测试。公开配置/品牌/数据库兼容/CI作用域4项回归也通过，合计 **274项定向测试**。前端TypeScript/Vite生产构建通过。不是全仓套件通过声明。
 - 测试起初遇到显式VIX开关污染和只读临时数据库/runs路径问题，使用独立临时数据库与tmpfs修正隔离后重跑通过；没有挂载生产数据库或请求真实服务。公开VIX测试也明确隔离开关，不依赖操作者配置。
 - 前端仍有图表chunk大小和Browserslist过期提示；后端保留已有FastAPI生命周期/Pydantic字段弃用提示。不是构建失败，本次未做无关依赖升级。
 - 未重启生产Docker、触发扫描/重新校准/真实模型分析或付费请求。GitHub完整CI以远端执行结果为准，下文首次全量CI历史记录保留，不冒称全部已修复。
 - 首次增量提交的远端CI没有执行任何job：既有工作流job级env引用`runner.temp`被GitHub判无效。后续将该变量移入测试step的env并增加回归，恢复工作流执行；未删除、忽略或改成允许失败来掩盖测试问题。
+
+### 全量 GitHub CI · 2026-10-09
+
+提交`53c4708`的 [真实CI](https://github.com/JohnCharlesFields/StockSignalForge/actions/runs/37870287664) 已通过依赖安装和语法检查，测试 **2703项通过、6项失败、2项跳过，另20个子测试通过**。该远端job因测试失败未运行后面的前端步骤，本地公开版前端构建已另行通过。
+
+尚待处理的测试如下，不能将这些失败藏进“验证通过”声明：
+
+- `test_chart_fallback_unittest.py::ChartFallbackTests::test_daily_chart_uses_existing_history_without_leaking_key`：预期`massive_http_429`诊断字段为空。
+- `test_global_equity_engine.py::TestSlippage::test_us_slippage_rate`：引擎滑点100.03与测试预期100.05不一致，需要核对统一成本契约，不为过测试改变成本。
+- `test_mcp_client_adapter.py::test_build_mcp_tool_wrappers_retries_transient_discovery_failure`：当前SDK的`MCPError`构造需要message参数。
+- `test_peer_earnings_signal_service.py::test_calendar_override_and_history_archive_are_auditable`：历史归档返回空。
+- `test_peer_earnings_signal_service.py::test_peer_earnings_history_summary_tracks_realized_followups`：历史跟进统计为空。
+- `test_pre_earnings_signal.py::TestEligibility::test_eligible_when_all_conditions_met`：资格条件未通过。
+
+以上需分别复现并核查，不宣称已全部修复。本次没有重写策略或屏蔽这些测试来让CI变绿。
 
 ## 本地配置
 
