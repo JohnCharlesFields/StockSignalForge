@@ -1,9 +1,11 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, Suspense, lazy, useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronRight, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { api, type LongOptionReview, type LongOptionScreenJob, type LongOptionScreenResponse, type LongOptionScreenRow, type LongOptionShadowScorecard, type PriorityBoardResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { GildataEvidencePanel } from "@/components/GildataEvidence";
+const CallPlan = lazy(() => import("@/components/CallPlan").then(m => ({ default: m.CallPlan })));
+const SEVEN = new Set(["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA"]);
 
 const STATUS: Record<string, string> = {
   signal: "方向信号", no_direction: "方向不明", missing_daily_history: "正股日线不足",
@@ -88,6 +90,7 @@ export function LongOptionBoard({ stockBoard }: { stockBoard: PriorityBoardRespo
   const [loading, setLoading] = useState(true);
   const [settling, setSettling] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [poolFilter, setPoolFilter] = useState("all");
 
   const refresh = async () => {
     setLoading(true);
@@ -148,6 +151,8 @@ export function LongOptionBoard({ stockBoard }: { stockBoard: PriorityBoardRespo
   const snapshot = data?.snapshot?.source === "equity:daily_ohlcv" ? data.snapshot : null;
   const oldSnapshot = Boolean(data?.snapshot && !snapshot);
   const stockPicks = new Map((stockBoard?.picks ?? []).map((pick) => [pick.symbol, pick]));
+  const visibleRows = (snapshot?.rows || []).filter(row => poolFilter === "all" ||
+    (poolFilter === "seven" ? SEVEN.has(row.symbol) : row.universe_source?.startsWith("cboe_option_volume_top")));
 
   return <>
     <section className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
@@ -192,12 +197,17 @@ export function LongOptionBoard({ stockBoard }: { stockBoard: PriorityBoardRespo
       </section>
       {snapshot.option_volume_research && <p className="text-xs text-muted-foreground">近一年期权活跃股：{snapshot.option_volume_research.leaders.length} 只 · {snapshot.option_volume_research.window_start || "--"} 至 {snapshot.option_volume_research.window_end || "--"} · {snapshot.option_volume_research.coverage || snapshot.option_volume_research.reason}</p>}
       <p className="text-xs leading-relaxed text-muted-foreground">{snapshot.note}</p>
+      <div className="flex flex-wrap items-center gap-3 text-xs">
+        <label className="flex items-center gap-2">研究池<select aria-label="单腿研究池筛选" value={poolFilter} onChange={e => { setPoolFilter(e.target.value); setExpanded(null); }} className="rounded border bg-background px-2 py-2">
+          <option value="all">全部</option><option value="seven">七姐妹</option><option value="active">期权活跃股（目标前20）</option>
+        </select></label><span className="text-muted-foreground">当前快照 {visibleRows.length} / {snapshot.rows.length} 只</span>
+      </div>
       <section className="border-y bg-card">
         <div className="hidden grid-cols-[3rem_minmax(5rem,1fr)_minmax(7rem,1.2fr)_minmax(5rem,0.9fr)_minmax(6rem,0.9fr)_minmax(5rem,0.8fr)_minmax(5rem,0.8fr)_minmax(6rem,0.9fr)] gap-2 bg-muted/40 px-3 py-2 text-xs text-muted-foreground md:grid">
           <span>#</span><span>标的 / 现价</span><span>赛道</span><span>方向</span><span>多头 / 空头</span><span>净共识</span><span>相对 SPY</span><span>HV20 / 日期</span>
         </div>
-        {snapshot.rows.length === 0 && <p className="px-4 py-8 text-center text-sm text-muted-foreground">当前没有可展示的标的。</p>}
-        {snapshot.rows.map((row, index) => {
+        {visibleRows.length === 0 && <p className="px-4 py-8 text-center text-sm text-muted-foreground">当前没有可展示的标的。</p>}
+        {visibleRows.map((row, index) => {
           const pick = stockPicks.get(row.symbol);
           const open = expanded === row.symbol;
           const label = direction(row);
@@ -205,14 +215,14 @@ export function LongOptionBoard({ stockBoard }: { stockBoard: PriorityBoardRespo
             <div className="grid grid-cols-2 gap-x-3 gap-y-2 border-t px-3 py-3 text-sm md:grid-cols-[3rem_minmax(5rem,1fr)_minmax(7rem,1.2fr)_minmax(5rem,0.9fr)_minmax(6rem,0.9fr)_minmax(5rem,0.8fr)_minmax(5rem,0.8fr)_minmax(6rem,0.9fr)] md:items-start md:gap-2">
               <button type="button" onClick={() => setExpanded(open ? null : row.symbol)} title="查看数据状态与研究风险" aria-label={`查看 ${row.symbol} 详情`} className="col-span-2 inline-flex items-center gap-1 text-left text-muted-foreground hover:text-foreground md:col-span-1">{open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}{index + 1}</button>
               <div className="font-semibold"><a className="text-primary hover:underline" href={`/single-stock-overnight?symbol=${row.symbol}`}>{row.symbol}</a><div className="font-mono text-xs font-normal text-muted-foreground">{dollars(row.spot)}</div></div>
-              <div className="text-xs"><span className="md:hidden text-muted-foreground">赛道 </span>{pick?.track_cn || pick?.track || (row.universe_source === "cboe_option_volume_top10" ? "期权活跃股" : "龙头研究")}{row.option_volume_12m != null && <div className="text-muted-foreground">Cboe 12月合约量 {row.option_volume_12m.toLocaleString()}</div>}</div>
+              <div className="text-xs"><span className="md:hidden text-muted-foreground">赛道 </span>{pick?.track_cn || pick?.track || (row.universe_source?.startsWith("cboe_option_volume_top") ? "期权活跃股" : "龙头研究")}{row.option_volume_12m != null && <div className="text-muted-foreground">Cboe 12月合约量 {row.option_volume_12m.toLocaleString()}</div>}</div>
               <div className={cn("text-xs font-semibold", label === "研究 Call" ? "text-emerald-600 dark:text-emerald-400" : label === "研究 Put" ? "text-rose-600 dark:text-rose-400" : "text-muted-foreground")}>{label}<div className="font-normal text-muted-foreground">{STATUS[row.status] || row.status}</div></div>
               <div className="font-mono text-xs"><span className="md:hidden text-muted-foreground">多 / 空 </span>{percent(row.bull_consensus)} / {percent(row.bear_consensus)}</div>
               <div className="font-mono text-xs"><span className="md:hidden text-muted-foreground">净共识 </span>{percent(row.net_consensus)}</div>
               <div className="font-mono text-xs"><span className="md:hidden text-muted-foreground">相对 SPY </span>{percent(row.relative_strength_20d)}</div>
               <div className="font-mono text-xs"><span className="md:hidden text-muted-foreground">HV20 </span>{percent(row.hv20)}<div className="text-muted-foreground">{row.stock_data_as_of || "日期 --"}</div></div>
             </div>
-            {open && <div className="border-t bg-muted/20 px-4 py-3"><SignalDetails row={row} /></div>}
+            {open && <div className="border-t bg-muted/20 px-4 py-3"><SignalDetails row={row} /><Suspense fallback={<span className="text-xs">载入计划入口…</span>}><CallPlan symbol={row.symbol} /></Suspense></div>}
           </Fragment>;
         })}
       </section>

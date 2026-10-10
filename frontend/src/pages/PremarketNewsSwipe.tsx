@@ -137,9 +137,11 @@ function NewsCard({ item, index, total }: { item: PremarketNewsItem; index: numb
             </div>
             {item.source_provenance?.note && <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{item.source_provenance.note}</p>}
             {poolHint && <div className="mt-1 text-xs text-muted-foreground">来源池：{poolHint}</div>}
+            {item.quote_as_of && <p className="mt-1 text-xs text-muted-foreground">日收盘参考 · {item.quote_as_of} · {item.quote_source} · 非实时价</p>}
+            {!!item.attribution?.channels?.length && <p className="mt-1 text-xs text-muted-foreground">销售渠道：{item.attribution.channels.join(" / ")}，非新闻主角</p>}
             {!isMarket && priceMissing && (
               <div className="mt-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
-                行情待补齐：新闻已命中股票池，但当前行情源暂未返回价格。
+                行情后台补齐中；暂未取得可核验价格，保留新闻，不用其他股票行情代替。
               </div>
             )}
           </div>
@@ -157,7 +159,7 @@ function NewsCard({ item, index, total }: { item: PremarketNewsItem; index: numb
           </div>
         ) : (
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          <Metric label="现价" value={priceMissing ? "待补齐" : money(item.current_price)} className={priceMissing ? "text-amber-600" : ""} />
+          <Metric label={item.quote_is_realtime === false ? "日收盘参考" : "现价"} value={priceMissing ? "待补齐" : money(item.current_price)} className={priceMissing ? "text-amber-600" : ""} />
           <Metric label="前收" value={money(item.previous_close)} />
           <Metric
             label="涨跌"
@@ -196,10 +198,10 @@ function NewsCard({ item, index, total }: { item: PremarketNewsItem; index: numb
             <div className="grid grid-cols-2 gap-3">
               <Metric
                 label="预计开盘影响"
-                value={pct(item.estimated_gap_pct)}
-                className={Number(item.estimated_gap_pct || 0) >= 0 ? "text-emerald-600" : "text-rose-600"}
+                value={item.estimated_gap_pct == null ? "不足以量化方向" : pct(item.estimated_gap_pct)}
+                className={item.estimated_gap_pct == null ? "text-muted-foreground" : Number(item.estimated_gap_pct) >= 0 ? "text-emerald-600" : "text-rose-600"}
               />
-              <Metric label="波动带宽" value={`±${pct(item.impact_band_pct)}`} />
+              <Metric label={item.impact_basis === "atr_reference" ? "日ATR参考·非开盘预测" : "波动带宽"} value={`±${pct(item.impact_band_pct)}`} />
               <Metric label="ATR 代理" value={pct(item.atr_pct)} />
               <Metric label="新闻方向" value={sentimentLabel(item.sentiment)} className={item.sentiment === "negative" ? "text-rose-600" : item.sentiment === "positive" ? "text-emerald-600" : ""} />
             </div>
@@ -250,6 +252,9 @@ export function PremarketNewsSwipe() {
         api.getPremarketNewsAutoStatus().catch(() => null),
       ]);
       setItems(queue.items || []);
+      if (queue.items?.some((item) => item.symbol !== "MARKET" && (!item.current_price || !item.quote_as_of || item.sentiment === "unreviewed"))) {
+        void api.enrichPremarketNews().catch(() => undefined);
+      }
       setSourceWarning(queue.source_mix_warning || "");
       setStatus(auto);
       setLatestNewsAt(queue.latest_update?.latest_news || null);

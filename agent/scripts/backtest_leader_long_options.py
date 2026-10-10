@@ -221,12 +221,30 @@ class CostCappedHistorical:
             dataset=DATASET, symbols=symbols, schema=schema, start=start, end=end, stype_in=stype,
         ))
         if not math.isfinite(estimate) or estimate < 0 or self.estimated_cost + estimate > self.max_cost:
+            self.requests.append({"schema": schema, "symbols": symbols, "cache_hit": False,
+                                  "status": "cost_blocked", "next_estimate": estimate if math.isfinite(estimate) else None})
             raise ValueError(f"cost_cap: next=${estimate:.4f}, cumulative=${self.estimated_cost:.4f}, cap=${self.max_cost:.4f}")
-        frame = self.client.timeseries.get_range(
-            dataset=DATASET, symbols=symbols, schema=schema, start=start, end=end, stype_in=stype,
-        ).to_df()
-        self.estimated_cost += estimate
-        self.requests.append({"schema": schema, "symbols": symbols, "cache_hit": False, "cost": estimate})
+        for attempt in range(2):
+            if self.estimated_cost + estimate > self.max_cost:
+                self.requests.append({"schema": schema, "symbols": symbols, "cache_hit": False,
+                                      "status": "cost_blocked", "next_estimate": estimate})
+                raise ValueError("cost_cap: retry would exceed cumulative cap")
+            # Reserve each potentially billable attempt, including transient failures.
+            self.estimated_cost += estimate
+            audit = {"schema": schema, "symbols": symbols, "cache_hit": False, "cost": estimate,
+                     "status": "requested", "attempt": attempt + 1}
+            self.requests.append(audit)
+            try:
+                frame = self.client.timeseries.get_range(
+                    dataset=DATASET, symbols=symbols, schema=schema, start=start, end=end, stype_in=stype,
+                ).to_df()
+            except Exception as exc:
+                audit["status"] = "failed_cost_reserved"
+                if attempt == 0 and type(exc).__name__ in {"SSLError", "ConnectionError", "ReadTimeout"}:
+                    continue
+                raise
+            audit["status"] = "downloaded"
+            break
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix(".tmp")
         frame.to_csv(temp, compression="gzip")

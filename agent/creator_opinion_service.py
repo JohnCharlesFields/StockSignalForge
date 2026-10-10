@@ -12,15 +12,21 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 import requests
 
-from app_database import connection, ensure_database
+from app_database import cache_get, cache_set, connection, ensure_database
 
 
 AGENT_DIR = Path(__file__).resolve().parent
@@ -28,11 +34,19 @@ RUNS_DIR = AGENT_DIR / "runs"
 COOKIES_FILE = Path(os.environ.get("YOUTUBE_COOKIES_FILE", AGENT_DIR / "secrets" / "youtube_cookies.txt"))
 REQUEST_TIMEOUT = int(os.environ.get("CREATOR_OPINION_REQUEST_TIMEOUT", "35"))
 TRANSCRIPT_MAX_CHARS = int(os.environ.get("CREATOR_TRANSCRIPT_MAX_CHARS", "18000"))
+_JOB_LOCK = threading.Lock()
+_JOB_ACTIVE = False
+_STATUS_KEY = "creator_opinion:refresh:v1"
 
 
 DEFAULT_CREATORS: list[dict[str, Any]] = [
     {"handle": "NaNaShuoMeiGu", "name": "NaNa说美股", "theme": "美股大盘 / AI产业链 / 期权结构"},
     {"handle": "TradesMax", "name": "TradesMax", "theme": "美股个股 / 财报交易"},
+    {"handle": "SiliconValleyVector", "name": "SiliconValleyVector", "theme": "美股科技 / AI产业链"},
+    {"handle": "ganzhi0906", "name": "ganzhi0906", "theme": "美股市场研究"},
+    {"handle": "bellafinance", "name": "Bella Finance", "theme": "美股市场研究"},
+    {"handle": "SUNNYFINANCE", "name": "Sunny Finance", "theme": "美股市场研究"},
+    {"handle": "BeckieAnalysis", "name": "Beckie Analysis", "theme": "美股市场研究"},
 ]
 
 TICKER_ALIASES: dict[str, list[str]] = {
@@ -79,6 +93,83 @@ NEGATIVE_TERMS = ["看空", "利空", "风险", "下跌", "抛售", "破位", "�
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc).timestamp() if parsed.tzinfo is None else parsed.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _local_day(value):
+    timestamp = _timestamp(value)
+    return datetime.fromtimestamp(timestamp, ZoneInfo("Asia/Shanghai")).date().isoformat() if timestamp else None
+
+
+def creator_refresh_status():
+    stored = cache_get(_STATUS_KEY) or {"status": "idle"}
+    if stored.get("status") in {"queued", "running"} and not _JOB_ACTIVE:
+        stored = {**stored, "status": "interrupted", "message": "上次更新被服务重启中断，可重新更新；已有视频保留"}
+    if stored.get("status") == "completed" and (stored.get("pending_analysis") or any(
+        video.get("opinion_available") is False
+        for channel in stored.get("channels", []) for video in channel.get("videos", [])
+    )):
+        stored = {**stored, "status": "partial"}
+    return {**stored, "auto_enabled": os.getenv("CREATOR_OPINION_AUTO_ENABLED", "1").lower() not in {"0", "false", "no"},
+            "auto_interval_seconds": max(1800, int(os.getenv("CREATOR_OPINION_AUTO_INTERVAL_SECONDS", "3600"))),
+            "max_analyses_per_run": max(1, min(10, int(os.getenv("CREATOR_OPINION_MAX_ANALYSES_PER_RUN", "2"))))}
+
+
+def start_creator_refresh(*, handles=None, limit_per_channel=1, use_llm=True, force=False, automatic=False):
+    global _JOB_ACTIVE
+    with _JOB_LOCK:
+        previous = cache_get(_STATUS_KEY) or {}
+        if _JOB_ACTIVE:
+            return {"started": False, **creator_refresh_status()}
+        since = time.time() - (_timestamp(previous.get("finished_at")) or 0)
+        interval = max(1800, int(os.getenv("CREATOR_OPINION_AUTO_INTERVAL_SECONDS", "3600"))) if automatic else 300
+        if since < interval:
+            return {"started": False, "status": "cooldown", "retry_after_seconds": int(interval - since)}
+        _JOB_ACTIVE = True
+        record = {"status": "queued", "started_at": _utc_now(), "automatic": automatic, "phase": "discover"}
+        try:
+            cache_set(_STATUS_KEY, record)
+        except Exception:
+            _JOB_ACTIVE = False
+            raise
+
+    def worker():
+        global _JOB_ACTIVE
+        try:
+            config = {"handles": list(handles) if handles else None, "limit_per_channel": limit_per_channel,
+                      "use_llm": use_llm, "force": force, "record": record}
+            completed = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--refresh", _json_dump(config)],
+                                       capture_output=True, text=True, encoding="utf-8",
+                                       timeout=max(90, min(600, int(os.getenv("CREATOR_OPINION_JOB_TIMEOUT", "300")))))
+            if completed.returncode:
+                raise RuntimeError("creator_refresh_worker_failed")
+            result = json.loads(completed.stdout.strip().splitlines()[-1])
+            cache_set(_STATUS_KEY, {**record, **result})
+        except subprocess.TimeoutExpired:
+            partial = cache_get(_STATUS_KEY) or record
+            cache_set(_STATUS_KEY, {**partial, "status": "partial", "finished_at": _utc_now(),
+                                    "error": "refresh_timeout", "message": "本轮达到时间预算；已发现的视频保留，下轮继续提炼"})
+        except Exception as exc:
+            cache_set(_STATUS_KEY, {**record, "status": "failed", "finished_at": _utc_now(), "error": type(exc).__name__})
+        finally:
+            with _JOB_LOCK:
+                _JOB_ACTIVE = False
+
+    try:
+        threading.Thread(target=worker, daemon=True, name="creator-opinion-refresh").start()
+    except Exception:
+        with _JOB_LOCK:
+            _JOB_ACTIVE = False
+        cache_set(_STATUS_KEY, {**record, "status": "failed", "finished_at": _utc_now()})
+        raise
+    return {"started": True, **record}
 
 
 def _json_dump(value: Any) -> str:
@@ -195,7 +286,7 @@ def seed_default_channels() -> int:
                     name = COALESCE(NULLIF(creator_channels.name, ''), excluded.name),
                     url = COALESCE(NULLIF(creator_channels.url, ''), excluded.url),
                     theme = COALESCE(NULLIF(creator_channels.theme, ''), excluded.theme),
-                    updated_at = excluded.updated_at
+                    updated_at = creator_channels.updated_at
                 """,
                 (handle, item.get("name", handle), f"https://www.youtube.com/@{handle}", item.get("theme", ""), stamp, stamp),
             )
@@ -217,12 +308,16 @@ def list_channels() -> list[dict[str, Any]]:
 
 
 def _resolve_channel_id(handle: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", handle):
+        raise ValueError("invalid_channel_handle")
     url = f"https://www.youtube.com/@{handle}"
-    text = _http().get(url, timeout=REQUEST_TIMEOUT).text
+    response = _http().get(url, timeout=(5, min(15, REQUEST_TIMEOUT)))
+    response.raise_for_status()
+    text = response.text
     for pattern in (
-        r'"browseId":"(UC[^"]+)"',
         r'"externalId":"(UC[^"]+)"',
         r'<meta itemprop="channelId" content="(UC[^"]+)"',
+        r'"browseId":"(UC[^"]+)"',
     ):
         match = re.search(pattern, text)
         if match:
@@ -231,8 +326,10 @@ def _resolve_channel_id(handle: str) -> str:
 
 
 def _rss_latest(channel_id: str, limit: int = 3) -> list[dict[str, Any]]:
+    if not re.fullmatch(r"UC[A-Za-z0-9_-]{22}", channel_id):
+        raise ValueError("invalid_channel_id")
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    response = _http().get(url, timeout=REQUEST_TIMEOUT)
+    response = _http().get(url, timeout=(5, min(15, REQUEST_TIMEOUT)))
     response.raise_for_status()
     root = ET.fromstring(response.content)
     ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
@@ -243,7 +340,7 @@ def _rss_latest(channel_id: str, limit: int = 3) -> list[dict[str, Any]]:
         published = entry.findtext("atom:published", default="", namespaces=ns)
         link_el = entry.find("atom:link", ns)
         link = link_el.attrib.get("href", "") if link_el is not None else f"https://www.youtube.com/watch?v={video_id}"
-        if video_id:
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) and published:
             videos.append({"video_id": video_id, "title": title, "published_at": published, "url": link})
     return videos
 
@@ -308,20 +405,46 @@ def _load_video(video_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+class _CaptionLogger:
+    def __init__(self):
+        self.auth_required = False
+
+    def debug(self, value):
+        pass
+
+    def info(self, value):
+        pass
+
+    def warning(self, value):
+        text = str(value).lower()
+        if "sign in to confirm" in text or "cookies are no longer valid" in text or "cookies have expired" in text:
+            self.auth_required = True
+
+    error = warning
+
+
 def _extract_with_ytdlp(video_id: str) -> dict[str, Any]:
     try:
         import yt_dlp  # type: ignore
     except Exception as exc:
         raise RuntimeError(f"yt_dlp_unavailable:{exc}") from exc
 
+    logger = _CaptionLogger()
     opts_base = {
         "skip_download": True,
         "quiet": True,
-        "no_warnings": True,
+        "no_warnings": False,
+        "logger": logger,
         "cookiefile": str(COOKIES_FILE) if COOKIES_FILE.exists() else None,
         "extract_flat": False,
         "ignore_no_formats_error": True,
+        "socket_timeout": 10,
+        "retries": 0,
+        "extractor_retries": 0,
     }
+    node = shutil.which("node")
+    if node:
+        opts_base["js_runtimes"] = {"node": {"path": node}}
     client_strategies = [None, ["tv"], ["web"], ["android"]]
     languages = ["zh-CN", "zh-Hans", "zh-Hant", "zh", "yue", "en", "en-US"]
     last_error = ""
@@ -332,10 +455,12 @@ def _extract_with_ytdlp(video_id: str) -> dict[str, Any]:
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            if logger.auth_required:
+                raise RuntimeError("youtube_auth_required")
             subtitles = info.get("subtitles") or {}
             auto = info.get("automatic_captions") or {}
             for source_name, source in (("subtitles", subtitles), ("automatic_captions", auto)):
-                for lang in languages:
+                for lang in list(dict.fromkeys(languages + [key for key in source if key.startswith(("zh", "en", "yue"))])):
                     rows = source.get(lang)
                     if not rows:
                         continue
@@ -346,6 +471,8 @@ def _extract_with_ytdlp(video_id: str) -> dict[str, Any]:
                     return {"info": info, "language": lang, "source": source_name, "method": f"yt-dlp:{client or 'default'}", "url": url}
             last_error = f"no_subtitles:{','.join(list(subtitles.keys())[:8])}:{','.join(list(auto.keys())[:8])}"
         except Exception as exc:
+            if logger.auth_required:
+                raise RuntimeError("youtube_auth_required") from None
             last_error = f"{type(exc).__name__}:{str(exc)[:240]}"
     raise RuntimeError(last_error or "subtitle_url_unavailable")
 
@@ -381,8 +508,10 @@ def fetch_transcript(video_id: str, *, force: bool = False) -> dict[str, Any]:
 
     video = _load_video(video_id)
     try:
-        meta = _extract_with_ytdlp(video_id)
-        text = _download_subtitle_text(meta["url"])
+        meta = _bounded_transcript(video_id)
+        if not meta.get("available"):
+            raise RuntimeError(meta.get("error") or "subtitle_unavailable")
+        text = meta["transcript_text"]
         if len(text) < 50:
             raise RuntimeError("transcript_too_short")
         if len(text) > TRANSCRIPT_MAX_CHARS:
@@ -419,7 +548,7 @@ def fetch_transcript(video_id: str, *, force: bool = False) -> dict[str, Any]:
             "fetched_at": stamp,
         }
     except Exception as exc:
-        detail = f"{type(exc).__name__}: {str(exc)[:400]}"
+        detail = _transcript_error(exc)
         with connection() as conn:
             conn.execute(
                 "UPDATE creator_videos SET transcript_status=?, error=? WHERE video_id=?",
@@ -427,6 +556,33 @@ def fetch_transcript(video_id: str, *, force: bool = False) -> dict[str, Any]:
             )
             conn.commit()
         return {"available": False, "video_id": video_id, "error": detail, "title": (video or {}).get("title", "")}
+
+
+def _transcript_error(exc):
+    value = str(exc).lower()
+    if isinstance(exc, subprocess.TimeoutExpired) or "hard_timeout" in value:
+        return "subtitle_timeout: 字幕提取超时，视频记录已保留"
+    if "sign in" in value or "bot" in value or "youtube_auth_required" in value:
+        return "youtube_auth_required: YouTube要求登录或人工验证；请在浏览器确认后更新授权Cookies"
+    if "no_subtitles" in value or "subtitle_unavailable" in value:
+        return "subtitle_unavailable: 当前未取得可用字幕，不能提炼视频观点"
+    return f"{type(exc).__name__}: 字幕源暂不可用，视频记录已保留"
+
+
+def _bounded_transcript(video_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError("invalid_video_id")
+    # yt-dlp may save its cookie jar on exit: only give it a disposable copy.
+    with tempfile.TemporaryDirectory(prefix="creator-caption-") as directory:
+        cookies = Path(directory) / "cookies.txt"
+        if COOKIES_FILE.is_file():
+            shutil.copy2(COOKIES_FILE, cookies)
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--transcript", video_id, str(cookies)],
+                                capture_output=True, text=True, encoding="utf-8",
+                                timeout=max(10, min(90, int(os.getenv("CREATOR_TRANSCRIPT_TIMEOUT", "60")))))
+        if result.returncode:
+            return {"available": False, "error": "subtitle_process_failed"}
+        return json.loads(result.stdout.strip().splitlines()[-1])
 
 
 def _mentions(text: str) -> list[str]:
@@ -571,7 +727,7 @@ def _deepseek_opinion(video: dict[str, Any], transcript: dict[str, Any]) -> dict
         return data
     except Exception as exc:
         data = _heuristic_opinion(video, transcript)
-        data["llm_error"] = f"{type(exc).__name__}: {str(exc)[:240]}"
+        data["llm_error"] = f"{type(exc).__name__}: 大模型提炼未完成，仅保留明确标注的字幕规则摘要"
         return data
 
 
@@ -583,7 +739,14 @@ def extract_opinion(video_id: str, *, use_llm: bool = True, force: bool = False)
         if cached:
             row = dict(cached)
             payload = _json_load(row.get("payload_json"), {})
-            return {"available": True, **payload, "cached": True}
+            if payload.get("available"):
+                return {**payload, "cached": True}
+            # A failed result is not a permanent cache hit, nor a successful opinion.
+            updated = _timestamp(row.get("updated_at"))
+            with connection() as conn:
+                recovered = conn.execute("SELECT chars FROM creator_transcripts WHERE video_id=?", (video_id,)).fetchone()
+            if not recovered and updated and time.time() - updated < 3600:
+                return {**payload, "available": False, "cached": True, "retry_after_seconds": 3600}
 
     video = _load_video(video_id)
     if not video:
@@ -591,8 +754,6 @@ def extract_opinion(video_id: str, *, use_llm: bool = True, force: bool = False)
     # Prefer the transcript already cached by the refresh loop.  This avoids
     # hitting YouTube twice for the same video when force-refreshing opinions.
     transcript = fetch_transcript(video_id, force=False)
-    if not transcript.get("available") and force:
-        transcript = fetch_transcript(video_id, force=True)
     if not transcript.get("available"):
         payload = {
             "available": False,
@@ -644,42 +805,88 @@ def refresh_creator_opinions(
     limit_per_channel: int = 1,
     use_llm: bool = True,
     force: bool = False,
+    progress=None,
 ) -> dict[str, Any]:
     seed_default_channels()
     selected = {h.strip().lstrip("@") for h in handles or [] if h.strip()}
     channels = [c for c in list_channels() if c.get("enabled")]
     if selected:
         channels = [c for c in channels if c.get("handle") in selected]
-    result = {"started_at": _utc_now(), "channels": [], "new_videos": 0, "opinions_ready": 0, "transcripts_ready": 0}
+    result = {"started_at": _utc_now(), "channels": [], "new_videos": 0, "opinions_ready": 0, "transcripts_ready": 0,
+              "phase": "discover", "status": "running", "processed_channels": 0, "total_channels": len(channels)}
+    candidates = []
     for channel in channels:
         handle = channel["handle"]
         item = {"handle": handle, "videos": [], "error": ""}
         try:
             channel_id = channel.get("channel_id") or _resolve_channel_id(handle)
+            videos = _rss_latest(channel_id, limit=15)
+            if not videos:
+                raise RuntimeError("empty_public_video_feed")
             _upsert_channel(handle, channel_id=channel_id)
-            videos = _rss_latest(channel_id, limit=limit_per_channel)
             for video in videos:
                 is_new = _store_video(handle, channel_id, video)
                 if is_new:
                     result["new_videos"] += 1
-                transcript = fetch_transcript(video["video_id"], force=force)
-                if transcript.get("available"):
-                    result["transcripts_ready"] += 1
-                opinion = extract_opinion(video["video_id"], use_llm=use_llm, force=force)
-                if opinion.get("available"):
-                    result["opinions_ready"] += 1
-                item["videos"].append({
-                    **video,
-                    "is_new": is_new,
-                    "transcript_available": bool(transcript.get("available")),
-                    "opinion_available": bool(opinion.get("available")),
-                    "opinion_status": opinion.get("status"),
-                    "reason": opinion.get("reason") or transcript.get("error"),
-                })
+                item["videos"].append({**video, "is_new": is_new})
+            candidates.extend(videos[:max(1, min(5, int(limit_per_channel)))])
         except Exception as exc:
-            item["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
+            item["error"] = f"{type(exc).__name__}: 公开视频列表暂不可用"
             _upsert_channel(handle, error=item["error"])
         result["channels"].append(item)
+        result["processed_channels"] += 1
+        if progress:
+            progress(result)
+    # Metadata for every channel is visible before any slow transcript/LLM work.
+    result["phase"] = "analyze"
+    cursor = int(cache_get("creator_opinion:analysis_cursor:v1") or 0)
+    candidates.sort(key=lambda v: v.get("published_at", ""), reverse=True)
+    pending = []
+    unavailable = 0
+    for video in candidates:
+        with connection() as conn:
+            prior = conn.execute("SELECT payload_json, updated_at FROM creator_opinions WHERE video_id=?", (video["video_id"],)).fetchone()
+        if prior and not force:
+            payload = _json_load(prior["payload_json"], {})
+            if payload.get("available"):
+                continue
+            with connection() as conn:
+                recovered = conn.execute("SELECT chars FROM creator_transcripts WHERE video_id=?", (video["video_id"],)).fetchone()
+            if not recovered and time.time() - (_timestamp(prior["updated_at"]) or 0) < 3600:
+                unavailable += 1
+                continue
+        pending.append(video)
+    if pending:
+        cursor %= len(pending)
+        pending = pending[cursor:] + pending[:cursor]
+    maximum = max(1, min(10, int(os.getenv("CREATOR_OPINION_MAX_ANALYSES_PER_RUN", "2"))))
+    for video in pending[:maximum]:
+        if progress:
+            result["current_video"] = video["title"]
+            progress(result)
+        try:
+            opinion = extract_opinion(video["video_id"], use_llm=use_llm, force=force)
+        except Exception as exc:
+            opinion = {"available": False, "status": "unavailable", "reason": f"{type(exc).__name__}: 提炼暂未完成"}
+        if opinion.get("available"):
+            result["opinions_ready"] += 1
+        else:
+            unavailable += 1
+        current = _load_video(video["video_id"]) or {}
+        if current.get("transcript_status") == "ready":
+            result["transcripts_ready"] += 1
+        for channel in result["channels"]:
+            for item in channel["videos"]:
+                if item["video_id"] == video["video_id"]:
+                    item.update(opinion_available=bool(opinion.get("available")), opinion_status=opinion.get("status"), reason=opinion.get("reason"))
+    if pending:
+        cache_set("creator_opinion:analysis_cursor:v1", cursor + maximum)
+    result["pending_analysis"] = max(0, len(pending) - maximum)
+    result["unavailable_opinions"] = unavailable
+    failed = sum(bool(channel["error"]) for channel in result["channels"])
+    result["status"] = "failed" if channels and failed == len(channels) else "partial" if failed or unavailable or result["pending_analysis"] else "completed"
+    result["phase"] = "done"
+    result.pop("current_video", None)
     result["finished_at"] = _utc_now()
     save_sector_signals_from_opinions()
     return result
@@ -691,11 +898,11 @@ def list_opinion_feed(limit: int = 50, offset: int = 0) -> dict[str, Any]:
         rows = conn.execute(
             """
             SELECT v.video_id, v.handle, v.title, v.url, v.published_at, v.transcript_status,
-                   v.opinion_status, v.error, t.language, t.chars, o.payload_json
+                   v.opinion_status, v.error, v.fetched_at, t.language, t.chars, o.payload_json
             FROM creator_videos v
             LEFT JOIN creator_transcripts t ON t.video_id = v.video_id
             LEFT JOIN creator_opinions o ON o.video_id = v.video_id
-            ORDER BY v.published_at DESC
+            ORDER BY datetime(v.published_at) DESC, v.video_id
             LIMIT ? OFFSET ?
             """,
             (max(1, int(limit)), max(0, int(offset))),
@@ -705,11 +912,12 @@ def list_opinion_feed(limit: int = 50, offset: int = 0) -> dict[str, Any]:
         d = dict(row)
         d["opinion"] = _json_load(d.pop("payload_json", None), {})
         items.append(d)
-    latest_date = items[0]["published_at"][:10] if items and items[0].get("published_at") else None
+    day_of = lambda item: _local_day(item.get("published_at"))
+    latest_date = day_of(items[0]) if items else None
     previous_date = None
     if latest_date:
         for item in items:
-            day = str(item.get("published_at") or "")[:10]
+            day = day_of(item)
             if day and day != latest_date:
                 previous_date = day
                 break
@@ -717,8 +925,8 @@ def list_opinion_feed(limit: int = 50, offset: int = 0) -> dict[str, Any]:
         "items": items,
         "latest_date": latest_date,
         "previous_date": previous_date,
-        "latest_count": sum(1 for x in items if latest_date and str(x.get("published_at") or "").startswith(latest_date)),
-        "previous_count": sum(1 for x in items if previous_date and str(x.get("published_at") or "").startswith(previous_date)),
+        "latest_count": sum(1 for x in items if latest_date and day_of(x) == latest_date),
+        "previous_count": sum(1 for x in items if previous_date and day_of(x) == previous_date),
     }
 
 
@@ -736,7 +944,7 @@ def _iter_recent_opinions(days: int = 3) -> list[dict[str, Any]]:
     for row in rows:
         item = dict(row)
         payload = _json_load(item.get("payload_json"), {})
-        if payload:
+        if payload and payload.get("available"):
             out.append(payload)
     return out
 
@@ -844,3 +1052,20 @@ def creator_opinion_tags_for_symbol(symbol: str, days: int = 3) -> list[dict[str
                     "evidence": view.get("evidence"),
                 })
     return tags[:5]
+
+
+if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] == "--transcript":
+    COOKIES_FILE = Path(sys.argv[3])
+    try:
+        meta = _extract_with_ytdlp(sys.argv[2])
+        text = _download_subtitle_text(meta["url"])
+        print(_json_dump({"available": True, "language": meta["language"], "source": meta["source"],
+                          "method": meta["method"], "transcript_text": text[:TRANSCRIPT_MAX_CHARS]}))
+    except Exception as exc:
+        print(_json_dump({"available": False, "error": _transcript_error(exc)}))
+
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--refresh":
+    config = json.loads(sys.argv[2])
+    record = config.pop("record")
+    result = refresh_creator_opinions(**config, progress=lambda value: cache_set(_STATUS_KEY, {**record, **value, "status": "running"}))
+    print(_json_dump(result))

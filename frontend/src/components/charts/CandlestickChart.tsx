@@ -237,8 +237,8 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
     // a "B?" so they read as "current setup", distinct from backtested green Bs.
     const marks = (markers || []).map(m => ({
       coord: [m.time, m.price],
-      value: m.live ? "B?" : (m.side === "BUY" ? "B" : "S"),
-      name: [`${m.live ? "今日/近期设置(未到期)" : m.side} @ ${m.price}`, m.qty ? `Qty: ${m.qty}` : "", m.reason || ""].filter(Boolean).join("\n"),
+      value: m.code?.startsWith("v-swing") ? (m.side === "BUY" ? "买" : "卖") : m.live ? "B?" : (m.side === "BUY" ? "B" : "S"),
+      name: [`${m.code?.startsWith("v-swing") ? `${m.text} · ${m.code.endsWith("replay") ? "时序回放" : "前向研究"}` : m.live ? "今日/近期设置(未到期)" : m.side} @ ${m.price}`, m.qty ? `Qty: ${m.qty}` : "", m.reason || ""].filter(Boolean).join("\n"),
       itemStyle: { color: m.live ? t.warningColor : (m.side === "BUY" ? t.upColor : t.downColor) },
       label: { color: "#fff", fontSize: 10, fontWeight: "bold" as const },
     }));
@@ -308,7 +308,13 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
       cursor += subH + GAP;
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const yAxes: any[] = [{ scale: true, gridIndex: 0, splitLine: { lineStyle: { color: t.gridColor } }, axisLabel: { color: t.textColor, fontSize: 10 } }, ...subYAxes];
+    const swingBounds = showLines ? (priceLines ?? []).filter(l => l.label.startsWith("波段") && Number.isFinite(l.price) && l.price > 0).map(l => l.price) : [];
+    const yAxes: any[] = [{ scale: true, gridIndex: 0, splitLine: { lineStyle: { color: t.gridColor } }, axisLabel: { color: t.textColor, fontSize: 10 },
+      ...(swingBounds.length ? {
+        min: (value: { min: number }) => Math.min(value.min, ...swingBounds) * .99,
+        max: (value: { max: number }) => Math.max(value.max, ...swingBounds) * 1.01,
+      } : {}),
+    }, ...subYAxes];
     const allXIdx = Array.from({ length: N + 1 }, (_unused, i) => i);
 
     // Backend custom indicators (Map-based O(1) lookup)

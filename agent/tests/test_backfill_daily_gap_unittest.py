@@ -30,6 +30,9 @@ class _FakeHistorical:
     def get_cost(self, **_kwargs) -> float:
         return self.cost
 
+    def get_dataset_range(self, **_kwargs) -> dict:
+        return {"schema": {"ohlcv-1d": {"end": "2026-10-10T00:00:00Z"}}}
+
     def get_range(self, **_kwargs) -> _FakeRange:
         self.downloads += 1
         return _FakeRange(self.frame)

@@ -109,6 +109,7 @@ from app_database import (
     signal_events_count,
     symbol_directory_count,
     symbol_directory_search,
+    symbol_directory_refresh_aliases,
     symbol_directory_upsert_many,
     user_watchlist_delete,
     user_watchlist_get,
@@ -368,6 +369,7 @@ class CreatorOpinionRefreshRequest(BaseModel):
     limit_per_channel: int = Field(1, ge=1, le=5)
     use_llm: bool = Field(True, description="Use configured DeepSeek/OpenAI-compatible LLM when transcript is available.")
     force: bool = Field(False, description="Re-fetch transcript and re-run opinion extraction even if cached.")
+    background: bool = Field(False, description="Return immediately and poll the creator status endpoint.")
 
 
 class PremarketNewsRefreshRequest(BaseModel):
@@ -655,6 +657,7 @@ _SSO_REFRESH_LOCK = threading.Lock()
 _SSO_REFRESH_ACTIVE: set = set()
 _SSO_REFRESH_SLOTS = threading.BoundedSemaphore(4)
 _SSO_SUMMARY_ACTIVE: set = set()
+_SSO_COMPANY_ACTIVE: set = set()
 
 
 def _sso_gather(tasks: Dict[str, Any], timeout: float = 14.0) -> Dict[str, Any]:
@@ -821,6 +824,7 @@ async def _run_startup_preflight() -> None:
 
     run_preflight(console)
     _start_premarket_news_auto_refresh()
+    _start_symbol_directory_maintenance()
 
 
 def _refresh_premarket_news_bounded(**options) -> Dict[str, Any]:
@@ -929,6 +933,11 @@ def _start_premarket_news_auto_refresh() -> None:
                     "last_error": f"{type(exc).__name__}: {str(exc)[-500:]}",
                 })
                 console.log(f"premarket news auto refresh failed: {str(exc)[-500:]}")
+            try:
+                from premarket_news_service import start_queue_enrichment
+                start_queue_enrichment(_SSO_REFRESH_SLOTS)
+            except Exception as exc:
+                console.log(f"news metadata scheduling deferred: {type(exc).__name__}")
             time.sleep(_PREMARKET_NEWS_AUTO_INTERVAL_SECONDS)
 
     threading.Thread(target=_loop, daemon=True, name="premarket-news-auto-refresh").start()
@@ -3872,6 +3881,9 @@ def _run_stock_signal_update_job(job_id: str, universe: str) -> None:
             job.update({"status": "failed", "message": f"专项扫描失败：{message}", "progress": 1.0})
         return
     script = AGENT_DIR / "scripts" / "screening_framework_v2_optimized.py"
+    previous_payload = None
+    if job.get("daily_current_symbols") is not None:
+        _previous_path, previous_payload, _derived = _stock_signal_find_report(universe)
     output = run_dir / f"options_screening_results_{universe}_{datetime.now().strftime('%y%m%d')}.json"
     if not script.exists():
         job.update({"status": "failed", "message": "筛选脚本不存在。"})
@@ -3895,6 +3907,11 @@ def _run_stock_signal_update_job(job_id: str, universe: str) -> None:
         cmd.append("--reuse-session-results")
     if job.get("daily_price_cache_only"):
         cmd.append("--daily-price-cache-only")
+        if job.get("daily_current_symbols") is not None:
+            if not job["daily_current_symbols"]:
+                job.update({"status": "failed", "message": "当天行情标的为空，不启动全池筛选"})
+                return
+            cmd.extend(["--tickers", ",".join(job["daily_current_symbols"])])
     if job.get("option_chain_cache_minutes") is not None:
         cmd.extend(["--option-chain-cache-minutes", str(job["option_chain_cache_minutes"])])
     job.update({"status": "running", "message": "正在解析股票池并拉取行情...", "progress": 0.02})
@@ -3933,6 +3950,10 @@ def _run_stock_signal_update_job(job_id: str, universe: str) -> None:
         if return_code != 0 or not output.exists():
             tail = "".join(stdout_lines[-20:]).strip()
             raise RuntimeError(tail or f"筛选脚本退出码 {return_code}")
+        if previous_payload:
+            fresh_payload = _load_json_file(output) or {}
+            merged = _merge_daily_subset_report(previous_payload, fresh_payload)
+            output.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
         job.update({
             "status": "completed",
             "message": "更新完成，正在载入最新报告。",
@@ -3957,6 +3978,18 @@ def _run_stock_signal_update_job(job_id: str, universe: str) -> None:
             proc.wait(timeout=5)
         with _stock_signal_update_lock:
             job["finished_at"] = datetime.utcnow().isoformat() + "Z"
+
+
+def _merge_daily_subset_report(previous: Dict[str, Any], fresh: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep untouched historical rows dated as-is; never shrink the pool on a partial day."""
+    merged = dict(fresh)
+    rows = {str(row.get("ticker") or "").upper(): row for row in previous.get("results", [])}
+    rows.update({str(row.get("ticker") or "").upper(): row for row in fresh.get("results", [])})
+    merged["results"] = [row for symbol, row in rows.items() if symbol]
+    merged["universe"] = {**(fresh.get("universe") or {}), **(previous.get("universe") or {})}
+    merged["daily_subset_count"] = len(fresh.get("results") or [])
+    merged["valid_tickers"] = len(merged["results"])
+    return merged
 
 
 def _stock_signal_report_candidates() -> List[Path]:
@@ -4030,12 +4063,19 @@ def _stock_signal_find_report(universe: str) -> tuple[Path | None, Dict[str, Any
     direct: tuple[Path, Dict[str, Any]] | None = None
     combined: tuple[Path, Dict[str, Any]] | None = None
     for path in _stock_signal_report_candidates():
+        if combined is not None and universe in _STOCK_SIGNAL_SPLIT_POOLS and _stock_signal_run_id(path) < _stock_signal_run_id(combined[0]):
+            break
+        match = re.search(r"options_screening_results_(.+?)_\d{6}\.json$", path.name)
+        if match and match.group(1) not in {universe, "sp100_komp_soxx"}:
+            continue
         payload = _load_json_file(path) or {}
         if not _stock_signal_report_has_results(payload):
             continue
         report_universe = _stock_signal_report_universe(payload, path)
         if report_universe == universe and direct is None:
             direct = (path, payload)
+            if universe not in _STOCK_SIGNAL_SPLIT_POOLS or combined is None:
+                break
         if report_universe == "sp100_komp_soxx" and combined is None:
             combined = (path, payload)
     if direct is not None and (
@@ -4099,17 +4139,29 @@ def _peer_relay_stock_signal_items(limit: int = 100) -> List[Dict[str, Any]]:
     return items[:limit]
 
 
-def _stock_signal_observation_pool(universe: str, limit: int = 100) -> List[Dict[str, Any]]:
+def _stock_signal_observation_pool(universe: str, limit: int = 100, required_session: str = "") -> List[Dict[str, Any]]:
     """Return strict candidates plus simple backup ideas for downstream scans."""
     if str(universe or "").strip().lower() == "watchlist":
-        return _watchlist_observation_pool(limit=limit)
+        rows = _watchlist_observation_pool(limit=500 if required_session else limit)
+        return [row for row in rows if not required_session or str(row.get("price_as_of") or "")[:10] == required_session][:limit]
     selected_path, selected_payload, _derived = _stock_signal_find_report(universe)
     if selected_path is None:
         return []
     run_id = _stock_signal_run_id(selected_path)
     memberships = (selected_payload.get("universe") or {}).get("memberships") or {}
     pool_results = _stock_signal_filter_results(selected_payload, universe)
-    return _stock_signal_candidate_pool(pool_results, memberships, run_id, limit)
+    if required_session:
+        pool_results = [row for row in pool_results if str(row.get("price_as_of") or "")[:10] == required_session]
+    rows = _stock_signal_candidate_pool(pool_results, memberships, run_id, limit)
+    if required_session:
+        coverage = _daily_report_price_coverage([universe], required_session)
+        missing = set(coverage.get("current_symbols") or []) - {row["ticker"] for row in rows}
+        if missing:
+            with external_data_scope(False):
+                fallback = _watchlist_observation_pool(limit=500, symbols=sorted(missing), source_label=universe)
+            rows.extend(row for row in fallback if str(row.get("price_as_of") or "")[:10] == required_session)
+        rows.sort(key=lambda row: -float(row.get("opportunity_score") or 0))
+    return rows[:limit]
 
 
 def _stock_signal_candidate_pool(
@@ -4121,7 +4173,7 @@ def _stock_signal_candidate_pool(
     return _shared_stock_signal_candidate_pool(pool_results, memberships, run_id, limit)
 
 
-def _watchlist_observation_pool(limit: int = 100) -> List[Dict[str, Any]]:
+def _watchlist_observation_pool(limit: int = 100, symbols: Optional[List[str]] = None, source_label: str = "自选池") -> List[Dict[str, Any]]:
     """Build lightweight first-layer opportunity rows from the user's watchlist.
 
     The normal first-layer script constructs option structures. A user watchlist
@@ -4130,11 +4182,12 @@ def _watchlist_observation_pool(limit: int = 100) -> List[Dict[str, Any]]:
     """
     try:
         from app_database import user_watchlist_list
-        from pullback_signal_service import detect_recent_pullback_setup
+        from pullback_signal_service import detect_pullback_setup
     except Exception:
         return []
     items = []
-    for item in user_watchlist_list(include_disabled=False)[: max(1, int(limit))]:
+    selected = user_watchlist_list(include_disabled=False) if symbols is None else [{"symbol": symbol} for symbol in symbols]
+    for item in selected[: max(1, int(limit))]:
         symbol = str(item.get("symbol") or "").upper()
         if not symbol:
             continue
@@ -4168,7 +4221,7 @@ def _watchlist_observation_pool(limit: int = 100) -> List[Dict[str, Any]]:
         pullback_rejection: Dict[str, Any] = {}
         pullback_confirmation: Dict[str, Any] = {}
         try:
-            pullback_rejection, pullback_confirmation = detect_recent_pullback_setup(recent_rows, ticker=symbol)
+            pullback_rejection, pullback_confirmation = detect_pullback_setup(recent_rows, ticker=symbol)
         except Exception:
             pullback_rejection = {"signal_name": "pullback_rejection", "signal_stage": "NONE", "score": 0.0, "risk_flags": ["pullback_calc_failed"]}
             pullback_confirmation = {"signal_name": "pullback_rejection_confirmation", "signal_stage": "NONE", "confirmation_score": 0.0}
@@ -4182,7 +4235,7 @@ def _watchlist_observation_pool(limit: int = 100) -> List[Dict[str, Any]]:
         score = round(max(0.0, min(100.0, score)), 1)
         items.append({
             "ticker": symbol,
-            "signal": "自选池观察",
+            "signal": "自选池观察" if symbols is None else "正股缓存观察",
             "signal_tone": "watch",
             "spot": spot,
             "price_as_of": recent_rows[-1]["Date"] if recent_rows else None,
@@ -4190,12 +4243,12 @@ def _watchlist_observation_pool(limit: int = 100) -> List[Dict[str, Any]]:
             "entry_zone_high": round(spot * 1.02, 2) if spot else None,
             "trend_30d": round(trend_30d, 4),
             "opportunity_score": score,
-            "opportunity_tier": "watchlist",
-            "candidate_label": "自选池",
+            "opportunity_tier": "watchlist" if symbols is None else "daily_cache_fallback",
+            "candidate_label": "自选池" if symbols is None else "缓存降级证据",
             "research_score": round(score / 10.0, 2),
-            "source_pools": ["自选池"],
+            "source_pools": [source_label],
             "risk_level": "中",
-            "risk_flags": ["自选池：期权辅助证据不强制要求，需人工复核基本面与流动性。"],
+            "risk_flags": [f"{source_label}：正股缓存降级证据，未核验期权与基本面，需人工复核。"],
             "rejection_reasons": [],
             "recent_closes": closes,
             "liquidity_score": 0.0,
@@ -4792,13 +4845,15 @@ def _research_signal_contexts_for_universe(
     universe: str,
     limit: int = 100,
     portfolio_timing: Optional[Dict[str, Any]] = None,
+    required_session: str = "",
 ) -> List[Dict[str, Any]]:
     """Build three-layer contexts for one universe using the shared win-rate ranking口径."""
     rows: List[Dict[str, Any]] = []
     hide_invalidated = os.getenv("HIDE_INVALIDATED_BY_DEFAULT", "1").lower() not in {"0", "false", "no"}
     requested_limit = max(1, int(limit or 100))
     raw_limit = min(500, max(requested_limit, requested_limit * 3 if hide_invalidated else requested_limit))
-    observation = _stock_signal_observation_pool(universe, limit=raw_limit)
+    observation = (_stock_signal_observation_pool(universe, limit=raw_limit, required_session=required_session)
+                   if required_session else _stock_signal_observation_pool(universe, limit=raw_limit))
     opportunity_map = {item["ticker"]: item for item in observation}
     shared_portfolio_timing = portfolio_timing or portfolio_timing_gate()
     peer_relay_pools = {"speculative_peer_earnings", "pre_earnings_revision"}
@@ -5454,11 +5509,13 @@ def _run_research_signal_hub_job(job_id: str, payload: ResearchSignalHubRunReque
     try:
         report_status = _stock_signal_report_reuse_status(universe)
         report_was_reusable = bool(report_status.get("reusable"))
+        if daily and not report_was_reusable:
+            data_warnings.append("日批仅使用当日正股缓存；旧期权机会报告不作为当日证据，缺失辅助证据待补充")
         if peer_relay_pool:
             update("opportunity", "专项池：跳过全量期权底层刷新，直接运行同行财报接力扫描。", 0.43)
         elif watchlist_pool:
             update("opportunity", "自选池：跳过期权报告刷新，直接使用自选标的运行实股三层信号。", 0.43)
-        elif payload.refresh_evidence and not report_was_reusable:
+        elif payload.refresh_evidence and not report_was_reusable and not daily:
             update("opportunity", "第一层：正在更新实股机会证据...", 0.03)
             child_job_id = f"stock_signal_{uuid.uuid4().hex[:10]}"
             child_run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:2]}_{uuid.uuid4().hex[:6]}"
@@ -5474,6 +5531,7 @@ def _run_research_signal_hub_job(job_id: str, payload: ResearchSignalHubRunReque
                 "option_chain_cache_minutes": payload.option_chain_cache_minutes,
                 "deadline_monotonic": job.get("deadline_monotonic"),
                 "daily_price_cache_only": job.get("daily_price_cache_only", False),
+                "daily_current_symbols": job.get("daily_current_symbols"),
             }
             if daily:
                 _stock_signal_update_jobs[child_job_id]["deadline_monotonic"] = min(
@@ -5514,7 +5572,11 @@ def _run_research_signal_hub_job(job_id: str, payload: ResearchSignalHubRunReque
             )
 
         update("opportunity", "第一层：正在读取严格机会观察池...", 0.45)
-        observation = [] if peer_relay_pool else _stock_signal_observation_pool(universe, limit=payload.top)
+        required_session = str(job.get("daily_required_session") or "")
+        observation = [] if peer_relay_pool else (
+            _stock_signal_observation_pool(universe, limit=payload.top, required_session=required_session)
+            if required_session else _stock_signal_observation_pool(universe, limit=payload.top)
+        )
         if daily and not observation and not peer_relay_pool:
             raise RuntimeError("该池没有可用机会报告，已跳过；不重复拉取全池行情")
         symbols = [item["ticker"] for item in observation]
@@ -5900,26 +5962,16 @@ def _upsert_dynamic_symbols() -> None:
 
 
 def _ensure_symbol_directory() -> None:
-    """Seed the persistent symbol directory once, then refresh dynamic sources on a TTL.
-
-    The autocomplete query path reads only from the SQLite ``symbol_directory``
-    table via SQL, so it never issues a live quote/search API call.
-    """
-    try:
-        has_rows = symbol_directory_count() > 0
-    except Exception:
-        has_rows = False
+    """Background-only seed/refresh of the persistent local symbol catalog."""
+    has_rows = symbol_directory_count() > 0
 
     if not has_rows:
-        try:
-            from symbol_seed import load_symbol_seed
+        from symbol_seed import load_symbol_seed
 
-            seed_rows = load_symbol_seed()
-            for item in seed_rows:
-                item["exchange_display"] = _single_exchange_display(item.get("exchange") or "")
-            symbol_directory_upsert_many(seed_rows)
-        except Exception:
-            pass
+        seed_rows = load_symbol_seed()
+        for item in seed_rows:
+            item["exchange_display"] = _single_exchange_display(item.get("exchange") or "")
+        symbol_directory_upsert_many(seed_rows)
         _upsert_dynamic_symbols()
         try:
             cache_set("symbol_directory_dynamic_refresh:v1", True, ttl_seconds=30 * 60)
@@ -5958,17 +6010,72 @@ def _fix_directory_exchanges_once() -> None:
         pass
 
 
+_SYMBOL_DIRECTORY_STOP = threading.Event()
+_SYMBOL_DIRECTORY_THREAD: Optional[threading.Thread] = None
+_SYMBOL_DIRECTORY_START_LOCK = threading.Lock()
+
+
+def _symbol_directory_maintenance_loop() -> None:
+    while not _SYMBOL_DIRECTORY_STOP.is_set():
+        started = time.perf_counter()
+        delay = 30 * 60
+        try:
+            _ensure_symbol_directory()
+            _refresh_symbol_directory_aliases()
+            print("[symbol-directory] " + json.dumps({
+                "status": "ready", "maintenance_ms": round((time.perf_counter() - started) * 1000, 2),
+            }), flush=True)
+        except Exception as exc:
+            delay = 60
+            print("[symbol-directory] " + json.dumps({"status": "retry_later", "error_type": type(exc).__name__}), flush=True)
+        _SYMBOL_DIRECTORY_STOP.wait(delay)
+
+
+def _refresh_symbol_directory_aliases() -> None:
+    from symbol_seed import load_symbol_alias_seed, load_symbol_seed
+
+    key = "symbol_directory_alias_refresh:v1"
+    if cache_get(key):
+        return
+    counts = symbol_directory_refresh_aliases(load_symbol_seed(), load_symbol_alias_seed())
+    cache_set(key, counts, ttl_seconds=30 * 60)
+    print("[symbol-aliases] " + json.dumps(counts), flush=True)
+
+
+def _start_symbol_directory_maintenance() -> None:
+    global _SYMBOL_DIRECTORY_THREAD
+    with _SYMBOL_DIRECTORY_START_LOCK:
+        if _SYMBOL_DIRECTORY_THREAD and _SYMBOL_DIRECTORY_THREAD.is_alive():
+            return
+        _SYMBOL_DIRECTORY_STOP.clear()
+        _SYMBOL_DIRECTORY_THREAD = threading.Thread(
+            target=_symbol_directory_maintenance_loop, daemon=True, name="symbol-directory-maintenance",
+        )
+        _SYMBOL_DIRECTORY_THREAD.start()
+
+
+@app.on_event("shutdown")
+async def _stop_symbol_directory_maintenance() -> None:
+    _SYMBOL_DIRECTORY_STOP.set()
+
+
 @app.get("/single-stock-overnight/search", dependencies=[Depends(require_auth)])
 async def single_stock_overnight_search(q: str = Query("", max_length=32), limit: int = Query(8, ge=1, le=12)):
     """Search US tickers for the single-stock overnight cockpit."""
     query = str(q or "").strip()
     if not query:
         return {"items": []}
-    _ensure_symbol_directory()
+    started = time.perf_counter()
+    error_type = None
     try:
-        items = symbol_directory_search(query, limit)
-    except Exception:
+        items = await asyncio.to_thread(symbol_directory_search, query, limit)
+    except Exception as exc:
         items = []
+        error_type = type(exc).__name__
+    print("[symbol-search] " + json.dumps({
+        "query_ms": round((time.perf_counter() - started) * 1000, 2),
+        "candidate_count": len(items), "external_call_count": 0, "error_type": error_type,
+    }), flush=True)
     return {"items": items, "cache_hit": True}
 
 
@@ -6186,7 +6293,7 @@ def _cboe_atm_iv(symbol: str, current_price: float, hv20: Optional[float]) -> Op
 
 
 def _single_option_iv(symbol: str, current_price: Optional[float], hv20: Optional[float]) -> Dict[str, Any]:
-    cache_key = f"single_stock_iv:v8:{symbol.upper()}"
+    cache_key = f"single_stock_iv:v9:{symbol.upper()}"
     cached = cache_get(cache_key)
     if isinstance(cached, dict):
         return {**cached, "cache_hit": True}
@@ -6227,18 +6334,20 @@ def _single_option_iv(symbol: str, current_price: Optional[float], hv20: Optiona
         atm_iv = _single_float(databento.get("atm_iv"))
         iv_hv20 = round(atm_iv / hv20, 4) if atm_iv and hv20 and hv20 > 0 else None
         call_greeks = _single_bs_greeks(
-            spot=current_price,
+            spot=_single_float(databento.get("underlying_price_for_iv")),
             strike=_single_float(databento.get("call_strike")),
             dte=int(databento.get("dte") or 0),
             sigma=_single_float(databento.get("call_iv")) or atm_iv,
             option_type="call",
+            risk_free_rate=0.04,
         )
         put_greeks = _single_bs_greeks(
-            spot=current_price,
+            spot=_single_float(databento.get("underlying_price_for_iv")),
             strike=_single_float(databento.get("put_strike")),
             dte=int(databento.get("dte") or 0),
             sigma=_single_float(databento.get("put_iv")) or atm_iv,
             option_type="put",
+            risk_free_rate=0.04,
         )
         payload = {
             **databento,
@@ -7071,10 +7180,13 @@ def _single_profile_research_overlay(symbol: str, profile: Dict[str, Any]) -> Di
         if company.get("business_cn"):
             out["vendor_business_cn"] = company["business_cn"]
         out["available"] = out.get("available") or bool(company)
+    from company_network_service import cached_network
+    out["company_network"] = cached_network(symbol, out)
+    out["company_update"] = cache_get(f"single_company_refresh:v1:{symbol}") or {}
     return out
 
 
-def _single_company_profile(symbol: str) -> Dict[str, Any]:
+def _single_company_profile(symbol: str, *, retry_ai: bool = False) -> Dict[str, Any]:
     """Company fundamentals card: structured facts (yfinance) + an LLM-written
     qualitative profile (business, supply chain, customers, competitors, moat,
     track position) in Chinese.  Cached 7 days per symbol -- this is slow-moving
@@ -7084,7 +7196,7 @@ def _single_company_profile(symbol: str) -> Dict[str, Any]:
     sym = str(symbol or "").upper()
     cache_key = f"single_company_profile:v3:{sym}"
     cached = cache_get(cache_key)
-    if isinstance(cached, dict):
+    if isinstance(cached, dict) and not (retry_ai and not cached.get("ai_available")):
         facts = cached.get("facts") if isinstance(cached.get("facts"), dict) else {}
         if external_data_allowed() and not facts.get("market_cap"):
             fresh = _single_enrich_company_facts(sym, _single_company_facts(sym))
@@ -7119,11 +7231,17 @@ def _single_company_profile(symbol: str) -> Dict[str, Any]:
                 "facts": {"name": sym}, "ai_available": False,
             })
         return {"available": False, "status": "loading", "symbol": sym}
-    facts = _single_enrich_company_facts(sym, _single_company_facts(sym))
-    facts = _single_profile_research_overlay(sym, {"facts": facts}).get("facts", facts)
+    if retry_ai:
+        # Company-only retry reads structured caches instead of price providers.
+        with external_data_scope(False):
+            existing = _single_company_profile(sym)
+        facts = dict(existing.get("facts") or {})
+    else:
+        facts = _single_enrich_company_facts(sym, _single_company_facts(sym))
+        facts = _single_profile_research_overlay(sym, {"facts": facts}).get("facts", facts)
     # Prefer FMP real fundamentals for the structured facts when available.
     try:
-        if not external_data_allowed():
+        if retry_ai or not external_data_allowed():
             raise RuntimeError("page_read_cache_only")
         from market_data_service import get_analyst_view, get_company_fundamentals, get_next_earnings
 
@@ -7139,8 +7257,9 @@ def _single_company_profile(symbol: str) -> Dict[str, Any]:
         earnings = get_next_earnings(sym) or {}
         analyst = get_analyst_view(sym) or {}
     except Exception:
-        earnings, analyst = {}, {}
+        earnings, analyst = (existing.get("earnings") or {}, existing.get("analyst") or {}) if retry_ai else ({}, {})
     profile: Dict[str, Any] = {
+        **(cached if retry_ai and isinstance(cached, dict) else {}),
         "available": True,
         "symbol": sym,
         "facts": facts,
@@ -7166,6 +7285,8 @@ def _single_company_profile(symbol: str) -> Dict[str, Any]:
                 "content": (
                     "你是美股行业研究助手。基于给定公司信息和你已知的事实，用中文输出该公司的基本面画像。"
                     "只输出严格 JSON，不要编造具体数字；不确定的字段给空数组或空字符串。"
+                    "上游供应、下游客户、竞争对手只能列具体公司，不得写运营商、元件供应商等类别。"
+                    "没有可靠公开披露的客户或供应商不要补猜测名单；母子公司关系不确定不得自动归并。"
                 ),
             },
             {
@@ -7212,6 +7333,9 @@ def _single_company_profile(symbol: str) -> Dict[str, Any]:
             profile["upstream_suppliers"] = inferred
             profile["upstream_suppliers_inferred"] = True
     cache_set(cache_key, profile, ttl_seconds=7 * 24 * 3600)
+    if retry_ai:
+        with external_data_scope(False):
+            return _single_profile_research_overlay(sym, profile)
     return _single_profile_research_overlay(sym, profile)
 
 
@@ -7308,7 +7432,9 @@ def _warm_single_stock_enrichment(symbol: str, current_price: Optional[float], h
     option_chain has no timeout of its own and can hang -- a hang must NOT stop
     the 'done' marker (otherwise the frontend polls forever)."""
     sym = str(symbol or "").upper()
-    iv_key = f"single_stock_iv:v8:{sym}"
+    company_state_key = f"single_company_refresh:v1:{sym}"
+    cache_set(company_state_key, {"status": "running"}, ttl_seconds=900)
+    iv_key = f"single_stock_iv:v9:{sym}"
     def _warm_research():
         from gildata_shadow_service import refresh_research
         from market_calendar import most_recent_session
@@ -7328,7 +7454,18 @@ def _warm_single_stock_enrichment(symbol: str, current_price: Optional[float], h
             with external_data_scope(True):
                 _single_option_iv(sym, current_price, hv20)
 
-        for fut in (_SSO_ENRICH_POOL.submit(_warm_leader), _SSO_ENRICH_POOL.submit(_warm_iv), research_future):
+        def _warm_network():
+            from company_network_service import refresh_network
+            from market_calendar import most_recent_session
+            try:
+                research_future.result(timeout=30)
+            except Exception:
+                pass
+            with external_data_scope(True):
+                return refresh_network(sym, prof or {}, most_recent_session().isoformat())
+
+        for fut in (_SSO_ENRICH_POOL.submit(_warm_leader), _SSO_ENRICH_POOL.submit(_warm_iv), research_future,
+                    _SSO_ENRICH_POOL.submit(_warm_network)):
             try:
                 fut.result(timeout=30)
             except Exception as exc:
@@ -7342,6 +7479,68 @@ def _warm_single_stock_enrichment(symbol: str, current_price: Optional[float], h
             cache_set(iv_key, {"available": False, "status": "timeout",
                                "status_cn": "期权源响应超时，IV 暂不可用（稍后重开再试）"}, ttl_seconds=1800)
         cache_set(f"single_stock_enrich_done:v1:{sym}", True, ttl_seconds=900)
+        network = cache_get(f"company_network:v1:{sym}") or {}
+        profile = cache_get(f"single_company_profile:v3:{sym}") or {}
+        cache_set(company_state_key, {"status": "completed" if profile.get("ai_available") and network.get("status") == "completed" else "partial",
+                                      "finished_at": time.time()}, ttl_seconds=900)
+
+
+def _start_single_company_refresh(symbol: str) -> Dict[str, Any]:
+    """Retry only company evidence, sharing the existing bounded refresh slots."""
+    state_key = f"single_company_refresh:v1:{symbol}"
+    with _SSO_REFRESH_LOCK:
+        state = cache_get(state_key) or {}
+        if symbol in _SSO_COMPANY_ACTIVE or any(key.startswith(f"single_stock_page:v1:{symbol}:") for key in _SSO_REFRESH_ACTIVE):
+            return {"started": False, "status": "running"}
+        if state.get("status") in {"queued", "running"}:
+            return {"started": False, "status": state["status"]}
+        if time.time() - state.get("finished_at", 0) < 120:
+            return {"started": False, "status": "cooldown", "retry_after_seconds": 120}
+        if not _SSO_REFRESH_SLOTS.acquire(blocking=False):
+            return {"started": False, "status": "busy"}
+        _SSO_COMPANY_ACTIVE.add(symbol)
+        cache_set(state_key, {"status": "queued"}, ttl_seconds=300)
+
+    def _worker():
+        status = "unavailable"
+        error = None
+        try:
+            cache_set(state_key, {"status": "running"}, ttl_seconds=300)
+            from gildata_shadow_service import refresh_research
+            from company_network_service import refresh_network
+            from market_calendar import most_recent_session
+            session = most_recent_session().isoformat()
+            try:
+                with external_data_scope(True):
+                    refresh_research([symbol], session)
+            except Exception as exc:
+                error = type(exc).__name__
+            with external_data_scope(False):
+                profile = _single_company_profile(symbol)
+            if not profile.get("ai_available"):
+                with external_data_scope(True):
+                    profile = _single_company_profile(symbol, retry_ai=True)
+            with external_data_scope(True):
+                network = refresh_network(symbol, profile, session, retry=True)
+            status = "completed" if not error and profile.get("ai_available") and network.get("status") == "completed" else "partial"
+        except Exception as exc:
+            error = type(exc).__name__
+            console.log(f"company-only refresh failed {symbol}: {error}")
+        finally:
+            cache_set(state_key, {"status": status, "finished_at": time.time(), "error": error}, ttl_seconds=900)
+            with _SSO_REFRESH_LOCK:
+                _SSO_COMPANY_ACTIVE.discard(symbol)
+                _SSO_REFRESH_SLOTS.release()
+
+    try:
+        threading.Thread(target=_worker, daemon=True, name=f"company-refresh-{symbol}").start()
+    except Exception:
+        cache_set(state_key, {"status": "unavailable", "finished_at": time.time()}, ttl_seconds=900)
+        with _SSO_REFRESH_LOCK:
+            _SSO_COMPANY_ACTIVE.discard(symbol)
+            _SSO_REFRESH_SLOTS.release()
+        raise
+    return {"started": True, "status": "queued"}
 
 
 def _single_metric_benchmarks(row: Dict[str, Any], iv_obj: Dict[str, Any], correlation: Dict[str, Any],
@@ -7756,13 +7955,14 @@ def _start_single_stock_refresh(symbol: str, universe: str, period: str) -> bool
     state_key = key + ":refresh"
     with _SSO_REFRESH_LOCK:
         state = cache_get(state_key) or {}
-        if key in _SSO_REFRESH_ACTIVE or (
+        if symbol in _SSO_COMPANY_ACTIVE or key in _SSO_REFRESH_ACTIVE or (
             state.get("status") == "completed" and time.time() - state.get("finished_at", 0) < 120
         ):
             return False
         if not _SSO_REFRESH_SLOTS.acquire(blocking=False):
             return False
         _SSO_REFRESH_ACTIVE.add(key)
+        cache_set(state_key, {"status": "queued"}, ttl_seconds=900)
 
     def _worker():
         status = "completed"
@@ -7799,6 +7999,7 @@ def _start_single_stock_refresh(symbol: str, universe: str, period: str) -> bool
         with _SSO_REFRESH_LOCK:
             _SSO_REFRESH_ACTIVE.discard(key)
             _SSO_REFRESH_SLOTS.release()
+        cache_set(state_key, {"status": "unavailable", "finished_at": time.time()}, ttl_seconds=900)
         raise
     return True
 
@@ -7849,7 +8050,12 @@ async def single_stock_overnight_enrich(symbol: str, universe: str = Query("auto
         key = _single_stock_page_key(safe, universe.strip().lower() or "auto", period)
         page = cache_get(key)
         state = cache_get(key + ":refresh") or {}
-        done = state.get("status") in {"completed", "unavailable"}
+        company_state = cache_get(f"single_company_refresh:v1:{safe}") or {}
+        core_finished = state.get("status") in {"completed", "unavailable"} or (
+            state.get("status", "idle") == "idle" and company_state.get("status") in {"completed", "partial", "unavailable"})
+        done = (core_finished
+                and company_state.get("status") not in {"queued", "running"}
+                and ((prof if isinstance(prof, dict) else {}).get("company_network") or {}).get("refresh_status") != "running")
 
         def fin(v):
             if done:
@@ -7863,10 +8069,59 @@ async def single_stock_overnight_enrich(symbol: str, universe: str = Query("auto
             "volatility": {"iv": fin(iv)},
             "core_payload": page if isinstance(page, dict) and page.get("page_revision") != revision else None,
             "refresh_status": state.get("status", "idle"),
+            "company_refresh_status": company_state.get("status", "idle"),
             "done": done,
         }
 
     return _json_safe(await asyncio.to_thread(_read))
+
+
+@app.post("/single-stock-overnight/{symbol}/company/refresh", dependencies=[Depends(require_auth)])
+async def single_stock_company_refresh(symbol: str):
+    """User-triggered company retry; no OHLCV, news, options or signal rerun."""
+    safe = _safe_event_ticker(symbol)
+    return _json_safe(await asyncio.to_thread(_start_single_company_refresh, safe))
+
+
+@app.get("/single-stock-overnight/{symbol}/supply-chain", dependencies=[Depends(require_auth)])
+async def single_stock_supply_chain(symbol: str):
+    from supply_chain_graph_service import build_graph
+    return _json_safe(await asyncio.to_thread(build_graph, _safe_event_ticker(symbol)))
+
+
+@app.get("/single-stock-overnight/{symbol}/call-plan", dependencies=[Depends(require_auth)])
+async def single_stock_call_plan(symbol: str):
+    from call_plan_service import read_plan
+    return _json_safe(await asyncio.to_thread(read_plan, _safe_event_ticker(symbol)))
+
+
+@app.post("/single-stock-overnight/{symbol}/call-plan", dependencies=[Depends(require_auth)])
+async def single_stock_call_plan_start(
+    symbol: str, capital: float = Query(2000, ge=100, le=10000000),
+    risk_pct: float = Query(1.5, ge=0.1, le=5), hold_days: int = Query(10, ge=1, le=10),
+    max_cost: float = Query(0, ge=0, le=1),
+):
+    from call_plan_service import PlanConfig, start_plan
+    config = PlanConfig(capital=capital, risk_fraction=risk_pct / 100, hold_days=hold_days)
+    return _json_safe(await asyncio.to_thread(start_plan, _safe_event_ticker(symbol), _SSO_REFRESH_SLOTS, config, max_cost))
+
+
+@app.get("/single-stock-overnight/{symbol}/news-research", dependencies=[Depends(require_auth)])
+async def single_stock_news_research(symbol: str):
+    from stock_news_research_service import read_news
+    return _json_safe(await asyncio.to_thread(read_news, _safe_event_ticker(symbol)))
+
+
+@app.post("/single-stock-overnight/{symbol}/news-research/summary", dependencies=[Depends(require_auth)])
+async def single_stock_news_research_summary(symbol: str):
+    from stock_news_research_service import start_summary
+    return _json_safe(await asyncio.to_thread(start_summary, _safe_event_ticker(symbol), _SSO_REFRESH_SLOTS))
+
+
+@app.post("/single-stock-overnight/{symbol}/supply-chain/refresh", dependencies=[Depends(require_auth)])
+async def single_stock_supply_chain_refresh(symbol: str):
+    from supply_chain_graph_service import start_refresh
+    return _json_safe(await asyncio.to_thread(start_refresh, _safe_event_ticker(symbol), _SSO_REFRESH_SLOTS))
 
 
 @app.get("/single-stock-overnight/{symbol}/candles", dependencies=[Depends(require_auth)])
@@ -7875,7 +8130,11 @@ async def single_stock_candles(symbol: str, timeframe: str = Query("daily")):
     Starter, not real-time tick). User-initiated single symbol -> external fetch
     allowed (Massive is unlimited)."""
     safe = _safe_event_ticker(symbol)
-    return _json_safe(await asyncio.to_thread(_single_candles, safe, timeframe))
+    result = await asyncio.to_thread(_single_candles, safe, timeframe)
+    if timeframe == "daily":
+        from v_swing_service import stock_snapshot
+        result = {**result, "v_swing": await asyncio.to_thread(stock_snapshot, safe)}
+    return _json_safe(result)
 
 
 def _pdf_price_png(candles: list, price_lines: list) -> Optional[str]:
@@ -8088,6 +8347,75 @@ async def export_priority_pdf(
 async def app_database_status():
     """Return the embedded SQLite database status."""
     return database_status()
+
+
+_V_SWING_LOCK = threading.Lock()
+_V_SWING_THREAD = None
+
+
+def _v_swing_run_worker(job_id):
+    from v_swing_service import JOB_KEY
+    import sys
+    result = {"job_id": job_id, "status": "running", "started_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        cache_set(JOB_KEY, result)
+        from market_calendar import most_recent_session
+        coverage = _daily_report_price_coverage(_auto_scan_universe_ids(), most_recent_session().isoformat())
+        symbols = coverage.get("symbols", [])
+        pools = {}
+        for pool, members in coverage.get("current_by_universe", {}).items():
+            for symbol in members:
+                pools.setdefault(symbol, []).append(pool)
+        proc = subprocess.run([sys.executable, str(AGENT_DIR / "scripts" / "run_v_swing.py")], cwd=str(AGENT_DIR),
+                              input=json.dumps({"symbols": symbols, "source_pools": pools}), capture_output=True, text=True, timeout=240)
+        outcome = json.loads(proc.stdout.strip().splitlines()[-1])
+        if proc.returncode:
+            result.update(status="failed", error_type=outcome.get("error_type", "worker_failed"))
+        else:
+            result.update(status=outcome.get("status", "failed"), result=outcome)
+    except Exception as exc:
+        result.update(status="failed", error_type=type(exc).__name__)
+    finally:
+        result["finished_at"] = datetime.now(timezone.utc).isoformat()
+        cache_set(JOB_KEY, result)
+
+
+def _start_v_swing():
+    global _V_SWING_THREAD
+    with _V_SWING_LOCK:
+        if _V_SWING_THREAD is not None and _V_SWING_THREAD.is_alive():
+            return {"status": "running", "already_running": True}
+        from v_swing_model import config
+        if not config()["enabled"]:
+            return {"status": "disabled"}
+        job_id = uuid.uuid4().hex[:12]
+        _V_SWING_THREAD = threading.Thread(target=_v_swing_run_worker, args=(job_id,), daemon=True, name="v-swing-refresh")
+        _V_SWING_THREAD.start()
+        return {"status": "running", "job_id": job_id}
+
+
+@app.post("/v-swing/run", dependencies=[Depends(require_auth)])
+async def v_swing_run():
+    return _start_v_swing()
+
+
+@app.get("/v-swing/status", dependencies=[Depends(require_auth)])
+async def v_swing_status():
+    def read():
+        from v_swing_service import SNAPSHOT_KEY, JOB_KEY, AUDIT_KEY
+        from v_swing_model import config as swing_config
+        cfg = swing_config()
+        snapshot = cache_get(SNAPSHOT_KEY) or {}
+        audit = cache_get(AUDIT_KEY) or {}
+        job = cache_get(JOB_KEY) or {"status": "idle"}
+        if job.get("status") == "running" and (_V_SWING_THREAD is None or not _V_SWING_THREAD.is_alive()):
+            job = {**job, "status": "interrupted"}
+        return {"enabled": cfg["enabled"], "rank_today_first": cfg["rank_today_first"], "job": job, "snapshot": {k: snapshot.get(k) for k in ("status", "session", "generated_at", "today_buys", "open_buys", "pattern_supported", "multipliers", "profit_calibration")},
+                "validation": {"experimental": True, "data_audit": audit.get("data_audit"), "ema_share": audit.get("ema_importance_share"),
+                               "group_sides": (audit.get("group_audit") or {}).get("sides"),
+                               "resolved_buys": (audit.get("forward_audit") or {}).get("resolved_buys"),
+                               "net_win_rate": (audit.get("forward_audit") or {}).get("net_win_rate")}}
+    return _json_safe(await asyncio.to_thread(read))
 
 
 @app.get("/priority-board", dependencies=[Depends(require_auth)])
@@ -8736,7 +9064,7 @@ def _auto_scan_universe_ids(explicit: Optional[List[str]] = None) -> List[str]:
 
 def _auto_scan_state() -> Dict[str, Any]:
     with _AUTO_SCAN_LOCK:
-        state = dict(_AUTO_SCAN_JOB)
+        state = copy.deepcopy(_AUTO_SCAN_JOB)
     now = datetime.now(_auto_scan_timezone())
     state.update({
         "enabled": _AUTO_SCAN_ENABLED,
@@ -8759,6 +9087,25 @@ def _auto_scan_state() -> Dict[str, Any]:
         state["market"] = ms
     except Exception:
         pass
+    state["active_worker_ids"] = _daily_active_worker_ids()
+    # Polling needs counters, never full per-stock evidence or news bodies.
+    for record in (state, state.get("last_record"), state.get("last_result")):
+        if not isinstance(record, dict):
+            continue
+        source = record.get("results") or []
+        if isinstance(source, dict):
+            source = source.values()
+        record["results"] = [
+            {**{key: value for key, value in item.items() if key not in {"result", "current_symbols"}},
+             "result": {key: value for key, value in (item.get("result") or {}).items() if key.endswith("count")}}
+            for item in source if isinstance(item, dict)
+        ]
+        if isinstance(record.get("cached_price_coverage"), dict):
+            record["cached_price_coverage"] = {key: value for key, value in record["cached_price_coverage"].items()
+                                               if key not in {"symbols", "current_symbols", "current_by_universe"}}
+        if isinstance(record.get("gildata_price_sync"), dict):
+            record["gildata_price_sync"] = {key: value for key, value in record["gildata_price_sync"].items()
+                                          if key not in {"written_symbols", "validated_symbols", "rejected"}}
     return _json_safe(state)
 
 
@@ -8847,32 +9194,40 @@ def _daily_report_price_coverage(universe_ids: Optional[List[str]], session: str
     report_index = _stock_signal_report_index()
     symbols: set[str] = set()
     missing_reports: List[str] = []
+    pool_symbols: Dict[str, List[str]] = {}
     for universe in universe_ids or []:
         if universe == "watchlist":
             from app_database import user_watchlist_list
-            symbols.update(str(item.get("symbol") or "").upper() for item in user_watchlist_list(include_disabled=False))
+            pool_symbols[universe] = [str(item.get("symbol") or "").upper() for item in user_watchlist_list(include_disabled=False)]
+            symbols.update(pool_symbols[universe])
             continue
         selected = report_index.get(universe)
         if not selected or not _stock_signal_report_has_results(selected[1]):
             missing_reports.append(universe)
             continue
-        symbols.update(
+        pool_symbols[universe] = list(
             str(item.get("ticker") or "").upper()
             for item in _stock_signal_filter_results(selected[1], universe)
         )
+        symbols.update(pool_symbols[universe])
     symbols.discard("")
     current = 0
+    current_symbols: List[str] = []
     stale: List[str] = []
     for symbol in sorted(symbols):
         frame = _read_daily_cache(symbol)
-        if not frame.empty and str(frame.index.max().date()) >= session:
+        if not frame.empty and session in {str(day.date()) for day in frame.index[-5:]}:
             current += 1
+            current_symbols.append(symbol)
         else:
             stale.append(symbol)
     return {
         "total": len(symbols), "current": current,
         "ratio": current / len(symbols) if symbols else 0.0,
         "stale_symbols": stale[:20], "missing_reports": missing_reports,
+        "current_symbols": current_symbols,
+        "symbols": sorted(symbols),
+        "current_by_universe": {pool: sorted(set(items) & set(current_symbols)) for pool, items in pool_symbols.items()},
     }
 
 
@@ -8908,7 +9263,9 @@ def _build_home_dashboard_snapshot_payload(
             continue
         universe_label = str(universe.get("label") or universe.get("name") or universe_id)
         try:
-            raw_rows = _research_signal_contexts_for_universe(universe_id, limit=30, portfolio_timing=portfolio_timing)
+            raw_rows = _research_signal_contexts_for_universe(
+                universe_id, limit=30, portfolio_timing=portfolio_timing, required_session=required_price_session,
+            )
             loaded += 1
         except Exception as exc:
             failed += 1
@@ -8976,7 +9333,7 @@ def _build_home_dashboard_snapshot_payload(
     if required_price_session:
         stale = [
             str(row.get("symbol") or "") for row in compact_rows
-            if str(row.get("price_as_of") or "") < required_price_session
+            if str(row.get("price_as_of") or "")[:10] != required_price_session
         ]
         coverage = (len(compact_rows) - len(stale)) / len(compact_rows) if compact_rows else 0.0
         if coverage < _daily_min_price_coverage() and (
@@ -9074,13 +9431,32 @@ def _build_home_dashboard_snapshot_payload(
     })
 
 
+class DailyPriceUnavailable(RuntimeError):
+    """Expected provider delay, not a successful scan or an internal crash."""
+
+
 def _daily_sync_prices(universe_ids, out, *, allow_partial=False):
     try:
         if allow_partial:
             from market_calendar import most_recent_session
             attempt = cache_get("daily_three_layer_auto:price_source_pause")
+            from gildata_daily_service import SYNC_VERSION, enabled as gildata_daily_enabled
+            gildata_attempt = cache_get("gildata:daily_last_status") or {}
+            if not isinstance(gildata_attempt, dict):
+                gildata_attempt = {}
+            if gildata_attempt.get("session") == most_recent_session().isoformat():
+                out["gildata_price_sync"] = gildata_attempt
+            # Permit the fixed local bug to retry once; provider cooldowns remain intact.
+            repaired_local_failure = (gildata_attempt.get("status") == "unavailable"
+                                      and gildata_attempt.get("error") == "TypeError"
+                                      and gildata_attempt.get("sync_version") != SYNC_VERSION)
+            primary_usable = (gildata_attempt.get("status") == "completed" or
+                              (gildata_attempt.get("status") == "partial" and bool(gildata_attempt.get("validated_symbols"))))
+            new_primary = gildata_daily_enabled() and (gildata_attempt.get("session") != most_recent_session().isoformat()
+                                                       or repaired_local_failure
+                                                       or (primary_usable and not gildata_attempt.get("circuit_open")))
             if (isinstance(attempt, dict) and attempt.get("session") == most_recent_session().isoformat()
-                    and time.time() - float(attempt.get("failed_at") or 0) < 1800):
+                    and time.time() - float(attempt.get("failed_at") or 0) < 1800 and not new_primary):
                 raise RuntimeError("行情补洞来源处于冷却期，复用当前缓存")
         return _daily_sync_prices_strict(universe_ids, out)
     except Exception as exc:
@@ -9093,8 +9469,9 @@ def _daily_sync_prices(universe_ids, out, *, allow_partial=False):
             cache_set("daily_three_layer_auto:price_source_pause", {"session": session, "failed_at": time.time()})
         coverage = _daily_report_price_coverage(universe_ids, session)
         out["cached_price_coverage"] = coverage
+        out.setdefault("price_repair", cache_get("daily_three_layer_auto:price_repair_last_error"))
         if not coverage.get("current"):
-            raise RuntimeError(f"没有 {session} 的可用行情；已快速结束，旧榜单保留") from exc
+            raise DailyPriceUnavailable(f"没有 {session} 的可用行情；已快速结束，旧榜单保留") from exc
         out["data_warnings"] = [f"行情同步未完整完成，仅继续处理 {coverage['current']}/{coverage['total']} 只有效缓存标的"]
         out["market_data_fresh"] = False
         console.log(f"[daily-degraded] price coverage {coverage['current']}/{coverage['total']} for {session}")
@@ -9133,6 +9510,15 @@ def _daily_sync_prices_strict(universe_ids, out):
             market_data_fresh = False
             out["market_data_fresh"] = False
     if market_data_fresh:
+        from gildata_daily_service import enabled as gildata_daily_enabled
+        if gildata_daily_enabled():
+            repair = _timed("gildata_daily_sync", lambda: _daily_gildata_gap_repair(session, coverage.get("symbols") or []))
+            out["gildata_price_sync"] = repair
+            coverage = _timed("post_gildata_coverage", lambda: _daily_report_price_coverage(universe_ids, session))
+            out["cached_price_coverage"] = coverage
+            if not coverage["missing_reports"] and coverage["ratio"] >= _daily_min_price_coverage():
+                cache_set("market_calendar:last_synced_session", session)
+                return session
         def _ingest():
             from scripts.ingest_grouped_daily import ingest_recent_grouped_daily
             ing = ingest_recent_grouped_daily(
@@ -9160,11 +9546,35 @@ def _daily_sync_prices_strict(universe_ids, out):
         console.log(f"market closed / no new session since {session}: skip price sync (news only)")
     return session
 
+def _daily_gildata_gap_repair(session, symbols):
+    """Reuse the daily subprocess watchdog; provider calls never block page reads."""
+    import sys
+    from gildata_daily_service import SYNC_VERSION
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [sys.executable, str(AGENT_DIR / "scripts" / "sync_gildata_daily.py"), "--session", session],
+            cwd=str(AGENT_DIR), input=json.dumps({"symbols": symbols}), capture_output=True,
+            text=True, timeout=180,
+        )
+        report = json.loads(result.stdout)
+        if not isinstance(report, dict):
+            raise ValueError("invalid_gildata_daily_report")
+    except Exception as exc:
+        report = {"status": "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "unavailable",
+                  "error": type(exc).__name__, "symbols_written": 0}
+    report.update(session=session, source="gildata:FinQuery:daily", sync_version=SYNC_VERSION,
+                  elapsed_seconds=round(time.monotonic() - started, 2))
+    cache_set("gildata:daily_last_status", report)
+    return report
+
+
 def _daily_databento_gap_repair(session):
     if not os.getenv("DATABENTO_API_KEY"):
         return {"ok": False, "error": "Databento key unavailable"}
     budget_key = "daily_three_layer_auto:price_repair_budget"
     today = _auto_scan_today_key()
+    reservation = 0.0
     try:
         import sys
         cap = max(0.0, float(os.getenv("VIBE_DAILY_PRICE_REPAIR_MAX_COST_USD", "0")))
@@ -9176,20 +9586,31 @@ def _daily_databento_gap_repair(session):
             remaining = max(0.0, cap - committed)
             if cap > 0 and remaining <= 0:
                 return {"ok": False, "error": "daily price repair budget exhausted", "max_cost_usd": cap}
-            # Reserve before execution. Unknown failures retain the reservation,
-            # since the vendor may have charged before the cache write failed.
-            cache_set(budget_key, {"date": today, "committed_usd": committed + remaining})
+            cache_set(budget_key, {"date": today, "committed_usd": committed})
 
         def settle(cost):
             with _AUTO_SCAN_LOCK:
-                cache_set(budget_key, {"date": today, "committed_usd": committed + cost})
+                latest = cache_get(budget_key) or {}
+                if latest.get("date") == today:
+                    cache_set(budget_key, {"date": today, "committed_usd": max(0.0, float(latest.get("committed_usd") or 0) - reservation + cost)})
 
         end = (datetime.fromisoformat(session) + timedelta(days=1)).date().isoformat()
-        result = subprocess.run(
-            [sys.executable, str(AGENT_DIR / "scripts" / "backfill_daily_gap.py"),
-             "--start", session, "--end", end, "--execute", "--max-cost-usd", str(remaining)],
-            cwd=str(AGENT_DIR), capture_output=True, text=True, timeout=120,
-        )
+        cmd = [sys.executable, str(AGENT_DIR / "scripts" / "backfill_daily_gap.py"),
+               "--start", session, "--end", end, "--max-cost-usd", str(remaining)]
+        result = subprocess.run(cmd, cwd=str(AGENT_DIR), capture_output=True, text=True, timeout=60)
+        if not result.returncode:
+            estimate = float(json.loads(result.stdout)["estimated_cost_usd"])
+            if not math.isfinite(estimate) or estimate < 0:
+                raise ValueError("invalid price repair cost estimate")
+            with _AUTO_SCAN_LOCK:
+                latest = cache_get(budget_key) or {}
+                committed_now = float(latest.get("committed_usd") or 0) if latest.get("date") == today else 0.0
+                if estimate > max(0.0, cap - committed_now):
+                    return {"ok": False, "error": "Databento price repair exceeds configured cost cap",
+                            "estimated_cost_usd": estimate, "max_cost_usd": cap}
+                reservation = estimate
+                cache_set(budget_key, {"date": today, "committed_usd": committed_now + reservation})
+            result = subprocess.run(cmd[:-1] + [str(reservation), "--execute"], cwd=str(AGENT_DIR), capture_output=True, text=True, timeout=120)
         if result.returncode:
             cost_error = re.search(r"Estimated cost \$([0-9.]+) exceeds cap \$([0-9.]+)", result.stderr or "")
             if cost_error:
@@ -9205,12 +9626,14 @@ def _daily_databento_gap_repair(session):
                 except (ValueError, TypeError):
                     pass
             detail = diagnostics[-1] if diagnostics else {}
-            if detail.get("phase") == "cost_estimate" and detail.get("download_started") is False:
+            if detail.get("download_started") is False:
                 settle(0.0)
             failure = {"ok": False, "error": detail.get("repair_error") or "Databento gap repair failed",
                        "phase": detail.get("phase", "unknown"), "return_code": result.returncode,
-                       "budget_reservation_retained": detail.get("download_started") is not False,
-                       "max_cost_usd": cap, "session": session}
+                       "budget_reservation_retained": reservation > 0 and detail.get("download_started") is not False,
+                       "max_cost_usd": cap, "session": session,
+                       "reserved_usd": reservation, "available_end": detail.get("available_end"),
+                       "status": "waiting_data" if detail.get("repair_error") == "daily_data_not_published" else "unavailable"}
             cache_set("daily_three_layer_auto:price_repair_last_error", failure)
             return failure
         report = json.loads(result.stdout)
@@ -9219,14 +9642,17 @@ def _daily_databento_gap_repair(session):
                 "estimated_cost_usd": report.get("estimated_cost_usd"), "max_cost_usd": cap}
     except Exception as exc:
         failure = {"ok": False, "error": type(exc).__name__, "session": session,
-                   "phase": "unknown", "budget_reservation_retained": True}
+                   "phase": "unknown", "budget_reservation_retained": reservation > 0,
+                   "reserved_usd": reservation}
         cache_set("daily_three_layer_auto:price_repair_last_error", failure)
         return failure
 
 
-def _daily_post_scan_finalize(universe_ids: Optional[List[str]]) -> Dict[str, Any]:
+def _daily_post_scan_finalize(universe_ids: Optional[List[str]], preflight: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Persist the daily snapshot and full candidate ledger before enrichment."""
     out: Dict[str, Any] = {"snapshot_id": "", "snapshot_row_count": 0, "market_data_fresh": True, "timings": {}}
+    if preflight:
+        out.update({key: preflight[key] for key in ("session", "cached_price_coverage", "data_warnings", "price_repair", "gildata_price_sync", "market_data_fresh") if key in preflight})
     try:
         return _daily_post_scan_finalize_impl(universe_ids, out)
     except Exception as exc:
@@ -9245,7 +9671,7 @@ def _daily_post_scan_finalize_impl(universe_ids, out):
             timings[label] = round(time.time() - t0, 2)
             console.log(f"[daily-timing] {label}: {timings[label]}s")
 
-    session = _daily_sync_prices(universe_ids, out, allow_partial=True)
+    session = out.get("session") or _daily_sync_prices(universe_ids, out, allow_partial=True)
 
     # 2) Cache-only compute (no external sockets -> cannot hang / cannot burn quota).
     with external_data_scope(False):
@@ -9262,6 +9688,10 @@ def _daily_post_scan_finalize_impl(universe_ids, out):
         if not rows:
             raise RuntimeError("daily snapshot has no candidates; keeping the previous successful snapshot")
         snapshot_payload["data_as_of"] = session
+        cached_coverage = out.get("cached_price_coverage") or {}
+        snapshot_payload["cached_price_coverage"] = {key: cached_coverage.get(key) for key in ("current", "total", "ratio")}
+        if cached_coverage.get("total") and float(cached_coverage.get("ratio") or 0) < _daily_min_price_coverage():
+            snapshot_payload["partial_price_evidence"] = True
         out["snapshot_id"] = _timed("snapshot_save", lambda: save_home_dashboard_snapshot(snapshot_payload, source="daily_auto"))
 
         from priority_board_service import MAX_CACHED_PICKS, compute_priority_board
@@ -9281,6 +9711,10 @@ def _daily_post_scan_finalize_impl(universe_ids, out):
 def _daily_post_scan_optional_enrichment() -> None:
     """Run nonessential enrichment after the candidate ledger is durable."""
     threading.Thread(target=_daily_update_optional_evidence, daemon=True, name="daily-evidence-refresh").start()
+    try:
+        _start_v_swing()
+    except Exception as exc:
+        console.log(f"v-swing background skipped: {type(exc).__name__}")
     try:
         from prediction_ledger_service import prediction_scorecard, resolve_predictions
         console.log(f"predictions resolved: {resolve_predictions()}")
@@ -9404,6 +9838,7 @@ def _run_daily_three_layer_auto_scan(
         })
     completed = 0
     failed = 0
+    skipped = 0
     llm_available = 0
     results: List[Dict[str, Any]] = []
     universe_timings: Dict[str, float] = {}
@@ -9417,15 +9852,30 @@ def _run_daily_three_layer_auto_scan(
             _AUTO_SCAN_JOB.update({"phase": phase, "message": "先检查最新交易日行情；通过后才运行三层扫描"})
         _start_daily_news_update()
         session = _daily_sync_prices(universe_ids, preflight, allow_partial=True)
+        preflight["session"] = session
+        coverage = preflight.get("cached_price_coverage") or _daily_report_price_coverage(universe_ids, session)
+        preflight["cached_price_coverage"] = coverage
+        eligible_by_pool = coverage.get("current_by_universe", {})
         checkpoint = cache_get(checkpoint_key) or {}
         reusable = (not force and checkpoint.get("date") == today
                     and checkpoint.get("session") == session and checkpoint.get("config") == signature)
         saved_results = dict(checkpoint.get("results") or {}) if reusable else {}
         checkpoint = {"date": today, "session": session, "config": signature, "results": saved_results}
         phase = "pool_scan"
+        with _AUTO_SCAN_LOCK:
+            _AUTO_SCAN_JOB["phase"] = phase
         for index, universe in enumerate(universe_ids, start=1):
+            eligible = eligible_by_pool.get(universe, [])
+            if not eligible:
+                skipped += 1
+                result = {"universe": universe, "status": "skipped", "message": f"没有 {session} 的可用行情标的，保留旧结果", "elapsed_seconds": 0}
+                results.append(result)
+                saved_results[universe] = result
+                cache_set(checkpoint_key, copy.deepcopy(checkpoint))
+                universe_timings[universe] = 0.0
+                continue
             saved = saved_results.get(universe) or {}
-            if saved.get("status") == "completed":
+            if saved.get("status") == "completed" and saved.get("current_symbols") == eligible:
                 results.append({**saved, "reused": True})
                 completed += 1
                 llm_available += int((saved.get("result") or {}).get("llm_review_available_count") or 0)
@@ -9459,6 +9909,8 @@ def _run_daily_three_layer_auto_scan(
                 "started_at": datetime.utcnow().isoformat() + "Z",
                 "deadline_monotonic": time.monotonic() + _AUTO_SCAN_CHILD_TIMEOUT_SECONDS,
                 "daily_price_cache_only": True,
+                "daily_current_symbols": eligible,
+                "daily_required_session": session,
             }
             child_thread = threading.Thread(
                 target=_run_research_signal_hub_job,
@@ -9511,24 +9963,28 @@ def _run_daily_three_layer_auto_scan(
                 "job_id": child_job_id,
                 "status": child.get("status"),
                 "message": child.get("message"),
-                "result": result,
+                "result": {key: value for key, value in result.items() if key.endswith("count")},
             })
             universe_timings[universe] = round(time.time() - child_started, 1)
             saved_results[universe] = {
                 **results[-1], "result": {
                     key: value for key, value in result.items() if key.endswith("count")
                 }, "elapsed_seconds": universe_timings[universe],
+                "current_symbols": eligible,
             }
             cache_set(checkpoint_key, copy.deepcopy(checkpoint))
             with _AUTO_SCAN_LOCK:
                 _AUTO_SCAN_JOB["results"] = copy.deepcopy(results)
             if child_thread.is_alive() or _daily_active_worker_ids():
                 raise RuntimeError(f"{universe} cancellation still winding down; stopped batch to avoid overlapping scans")
+        if not completed and not failed:
+            raise DailyPriceUnavailable(f"所选池没有 {session} 的可用标的；无耗时扫描，旧榜单保留")
         universe_loop_total = round(time.time() - loop_started, 1)
         phase = "finalize"
         with _AUTO_SCAN_LOCK:
             _AUTO_SCAN_JOB.update({
                 "message": "building unified SQLite home snapshot",
+                "phase": phase,
                 "progress": 0.9,
                 "current_universe": "",
             })
@@ -9538,7 +9994,7 @@ def _run_daily_three_layer_auto_scan(
 
         def _finalize_worker() -> None:
             try:
-                finalize.update(_daily_post_scan_finalize(universe_ids))
+                finalize.update(_daily_post_scan_finalize(universe_ids, preflight=preflight))
             except Exception as exc:  # never let the worker die silently
                 finalize.update(getattr(exc, "daily_result", {}))
                 finalize["error"] = str(exc)[-1200:]
@@ -9558,7 +10014,9 @@ def _run_daily_three_layer_auto_scan(
         snapshot_id = finalize.get("snapshot_id", "")
         snapshot_row_count = int(finalize.get("snapshot_row_count", 0) or 0)
         finalize["data_warnings"] = list(dict.fromkeys([*(preflight.get("data_warnings") or []), *(finalize.get("data_warnings") or [])]))
-        status, finalize_error = _daily_finalize_outcome(finalize, finalize_timed_out, failed)
+        status, finalize_error = _daily_finalize_outcome(finalize, finalize_timed_out, failed + skipped)
+        if not finalize_timed_out and not snapshot_id and not failed and "current-session snapshot blocked" in finalize_error:
+            status = "waiting_data"
         finished_at = datetime.now(_auto_scan_timezone()).isoformat()
         summary = {
             "date": today,
@@ -9570,6 +10028,7 @@ def _run_daily_three_layer_auto_scan(
             "universe_count": len(universe_ids),
             "completed_universe_count": completed,
             "failed_universe_count": failed,
+            "skipped_universe_count": skipped,
             "llm_review_available_count": llm_available,
             "snapshot_id": snapshot_id,
             "snapshot_row_count": snapshot_row_count,
@@ -9582,6 +10041,7 @@ def _run_daily_three_layer_auto_scan(
             "results": [copy.deepcopy(saved_results[u]) for u in universe_ids if u in saved_results],
             "resumed_universe_count": sum(1 for item in results if item.get("reused")),
             "price_repair": preflight.get("price_repair"),
+            "gildata_price_sync": preflight.get("gildata_price_sync"),
             "data_warnings": finalize.get("data_warnings") or [],
             "prediction_ledger": finalize.get("prediction_ledger"),
             "market_data_fresh": bool(finalize.get("market_data_fresh", True)),
@@ -9603,26 +10063,30 @@ def _run_daily_three_layer_auto_scan(
                 "finished_at": finished_at,
                 "last_result": summary,
                 "results": results[-20:],
+                "phase": phase,
+                "current_child_job_id": None, "current_child_phase": None, "current_child_message": None,
             })
-        if status != "failed":
+        if status in {"completed", "partial"}:
             threading.Thread(target=_daily_post_scan_optional_enrichment, daemon=True).start()
     except Exception as exc:
         finished_at = datetime.now(_auto_scan_timezone()).isoformat()
         summary = {
             "date": today,
-            "status": "failed",
+            "status": "waiting_data" if isinstance(exc, DailyPriceUnavailable) else "failed",
             "reason": reason,
             "force": force,
             "started_at": started_at,
             "finished_at": finished_at,
             "universe_count": len(universe_ids),
             "completed_universe_count": completed,
-            "failed_universe_count": failed + max(0, len(universe_ids) - completed - failed),
+            "failed_universe_count": failed,
+            "skipped_universe_count": skipped + max(0, len(universe_ids) - completed - failed - skipped),
             "error": str(exc)[-1200:],
             "phase": phase,
             "results": copy.deepcopy(results),
             "cached_price_coverage": preflight.get("cached_price_coverage"),
             "price_repair": preflight.get("price_repair"),
+            "gildata_price_sync": preflight.get("gildata_price_sync"),
             "phase_timings": {
                 **preflight["timings"], "per_universe": universe_timings,
                 "total": round(time.time() - loop_started, 1),
@@ -9632,12 +10096,14 @@ def _run_daily_three_layer_auto_scan(
         cache_set(_AUTO_SCAN_STATE_KEY, summary)
         with _AUTO_SCAN_LOCK:
             _AUTO_SCAN_JOB.update({
-                "status": "failed",
-                "message": f"daily auto scan failed: {str(exc)[-500:]}",
+                "status": summary["status"],
+                "message": str(exc)[-500:],
                 "progress": 1.0,
                 "finished_at": finished_at,
                 "last_result": summary,
                 "results": results[-20:],
+                "phase": phase,
+                "current_child_job_id": None, "current_child_phase": None, "current_child_message": None,
             })
 
 
@@ -9736,6 +10202,7 @@ def _run_daily_finalize_only() -> None:
         "finalize_timed_out": timed_out, "error": error or None,
         "market_data_fresh": finalize.get("market_data_fresh"),
         "price_repair": finalize.get("price_repair"),
+        "gildata_price_sync": finalize.get("gildata_price_sync"),
         "data_warnings": finalize.get("data_warnings") or [],
         "phase_timings": {"total": round(time.time() - started, 1), **(finalize.get("timings") or {})},
     }
@@ -9753,14 +10220,20 @@ def _run_daily_finalize_only() -> None:
         threading.Thread(target=_daily_post_scan_optional_enrichment, daemon=True).start()
 
 
+def _daily_waiting_for_publication(record):
+    return (record.get("price_repair") or {}).get("status") == "waiting_data"
+
+
 def _daily_auto_retry_due(now, record):
-    if record.get("date") != _auto_scan_today_key(now) or record.get("status") not in {"failed", "partial"}:
+    if record.get("date") != _auto_scan_today_key(now) or record.get("status") not in {"failed", "partial", "waiting_data"}:
         return False
     if record.get("phase") not in {"price_preflight", "finalize"}:
         return False
     retry = cache_get("daily_three_layer_auto:retries") or {}
-    count = int(retry.get("count", 0)) if retry.get("date") == record["date"] else 0
-    limit = max(0, int(os.getenv("VIBE_DAILY_AUTO_RETRY_LIMIT", "2")))
+    waiting = _daily_waiting_for_publication(record)
+    counter = "data_wait_count" if waiting else "count"
+    count = int(retry.get(counter, 0)) if retry.get("date") == record["date"] else 0
+    limit = max(0, int(os.getenv("VIBE_DAILY_DATA_WAIT_RETRY_LIMIT", "8") if waiting else os.getenv("VIBE_DAILY_AUTO_RETRY_LIMIT", "2")))
     if count >= limit:
         return False
     try:
@@ -9788,11 +10261,11 @@ def _daily_three_layer_auto_loop() -> None:
                 if (
                     not running
                     and last_record.get("date") == _auto_scan_today_key(now)
-                    and last_record.get("status") in {"completed", "partial", "failed"}
+                    and last_record.get("status") in {"completed", "partial", "failed", "waiting_data"}
                 ):
                     _AUTO_SCAN_JOB.update({
                         "status": last_record["status"],
-                        "message": "today's daily auto scan already attempted; manual retry is available",
+                        "message": last_record.get("error") or f"今日跑批状态：{last_record['status']}；可手动接续",
                         "progress": 1.0,
                         "last_result": last_record,
                         "finished_at": last_record.get("finished_at"),
@@ -9800,7 +10273,7 @@ def _daily_three_layer_auto_loop() -> None:
             if (
                 not running
                 and now >= scheduled
-                and not (last_record.get("date") == _auto_scan_today_key(now) and last_record.get("status") in {"completed", "partial", "failed"})
+                and not (last_record.get("date") == _auto_scan_today_key(now) and last_record.get("status") in {"completed", "partial", "failed", "waiting_data"})
             ):
                 _start_daily_three_layer_auto_scan(
                     reason="scheduled_or_startup_catchup",
@@ -9808,8 +10281,11 @@ def _daily_three_layer_auto_loop() -> None:
                 )
             elif not running and not _daily_active_worker_ids() and _daily_auto_retry_due(now, last_record):
                 retry = cache_get("daily_three_layer_auto:retries") or {}
-                count = int(retry.get("count", 0)) if retry.get("date") == _auto_scan_today_key(now) else 0
-                cache_set("daily_three_layer_auto:retries", {"date": _auto_scan_today_key(now), "count": count + 1})
+                if retry.get("date") != _auto_scan_today_key(now):
+                    retry = {"date": _auto_scan_today_key(now)}
+                counter = "data_wait_count" if _daily_waiting_for_publication(last_record) else "count"
+                retry[counter] = int(retry.get(counter, 0)) + 1
+                cache_set("daily_three_layer_auto:retries", retry)
                 _start_daily_three_layer_auto_scan(reason="automatic_checkpoint_retry")
             sleep_seconds = _AUTO_SCAN_POLL_SECONDS
             if now < scheduled:
@@ -11221,15 +11697,46 @@ async def creator_opinion_channels():
 async def creator_opinion_refresh(payload: CreatorOpinionRefreshRequest):
     """Refresh latest creator videos and extract soft opinion/sector signals."""
     try:
-        return await asyncio.to_thread(
-            refresh_creator_opinions,
-            handles=payload.handles,
-            limit_per_channel=payload.limit_per_channel,
-            use_llm=payload.use_llm,
-            force=payload.force,
-        )
+        from creator_opinion_service import creator_refresh_status, start_creator_refresh
+        result = await asyncio.to_thread(start_creator_refresh, handles=payload.handles,
+            limit_per_channel=payload.limit_per_channel, use_llm=payload.use_llm, force=payload.force)
+        if payload.background:
+            return result
+        if not result.get("started"):
+            return result
+        # Legacy callers may wait, but share the same bounded background job.
+        while True:
+            await asyncio.sleep(1)
+            status = await asyncio.to_thread(creator_refresh_status)
+            if status.get("status") not in {"queued", "running"}:
+                return status
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"creator opinion refresh failed: {str(exc)[:500]}") from exc
+        raise HTTPException(status_code=500, detail=f"creator opinion refresh failed: {type(exc).__name__}") from exc
+
+
+@app.get("/creator-opinions/status", dependencies=[Depends(require_auth)])
+async def creator_opinion_status():
+    from creator_opinion_service import creator_refresh_status
+    return _json_safe(await asyncio.to_thread(creator_refresh_status))
+
+
+def _creator_opinion_auto_loop():
+    from creator_opinion_service import start_creator_refresh
+    if os.getenv("CREATOR_OPINION_AUTO_ENABLED", "1").lower() in {"0", "false", "no"}:
+        return
+    time.sleep(90)
+    while True:
+        try:
+            if _AUTO_SCAN_JOB.get("status") not in {"running", "queued"} and not _daily_active_worker_ids():
+                start_creator_refresh(automatic=True)
+        except Exception as exc:
+            console.log(f"creator scheduler: {type(exc).__name__}")
+        time.sleep(300)
+
+
+@app.on_event("startup")
+async def _start_creator_opinion_scheduler():
+    threading.Thread(target=_creator_opinion_auto_loop, daemon=True, name="creator-opinion-scheduler").start()
 
 
 @app.get("/creator-opinions/feed", dependencies=[Depends(require_auth)])
@@ -11264,7 +11771,7 @@ async def premarket_news_source_audit():
 @app.get("/premarket-news/auto-status", dependencies=[Depends(require_auth)])
 async def premarket_news_auto_status():
     """Status of the 15-minute background news refresher."""
-    return {**_PREMARKET_NEWS_AUTO_STATUS, "gildata_news": cache_get("gildata:news_validation"),
+    return {**_PREMARKET_NEWS_AUTO_STATUS, "metadata": cache_get("premarket_news:metadata_status"), "gildata_news": cache_get("gildata:news_validation"),
             "gildata_supplement": cache_get("gildata:news_supplement_last_status")}
 
 
@@ -11283,6 +11790,13 @@ async def premarket_news_refresh(payload: PremarketNewsRefreshRequest):
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"premarket news refresh failed: {str(exc)[:500]}") from exc
+
+
+@app.post("/premarket-news/enrich", dependencies=[Depends(require_auth)])
+async def premarket_news_enrich():
+    """Schedule bounded metadata repair; does not fetch another news batch."""
+    from premarket_news_service import start_queue_enrichment
+    return await asyncio.to_thread(start_queue_enrichment, _SSO_REFRESH_SLOTS)
 
 
 @app.get("/premarket-news", dependencies=[Depends(require_auth)])

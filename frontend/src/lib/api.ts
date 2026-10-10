@@ -1,4 +1,6 @@
 import { authHeaders, withAuthQuery } from "@/lib/apiAuth";
+import type { SupplyGraph } from "@/components/SupplyChainGraph";
+import type { CallPlanData } from "@/components/CallPlan";
 
 const BASE = "";
 
@@ -67,6 +69,12 @@ async function uploadFile(file: File): Promise<UploadResult> {
 }
 
 export const api = {
+  getCallPlan: (symbol: string, signal?: AbortSignal) => request<CallPlanData>(`/single-stock-overnight/${encodeURIComponent(symbol)}/call-plan`, { signal }),
+  runCallPlan: (symbol: string, options: { capital: number; risk_pct: number; hold_days: number; max_cost: number }, signal?: AbortSignal) => request<{ started: boolean; status: string }>(`/single-stock-overnight/${encodeURIComponent(symbol)}/call-plan?${new URLSearchParams(Object.entries(options).map(([key, value]) => [key, String(value)]))}`, { method: "POST", signal }),
+  getStockNewsResearch: (symbol: string, signal?: AbortSignal) => request<StockNewsResearchData>(`/single-stock-overnight/${encodeURIComponent(symbol)}/news-research`, { signal }),
+  summarizeStockNews: (symbol: string, signal?: AbortSignal) => request<{ started: boolean; status: string }>(`/single-stock-overnight/${encodeURIComponent(symbol)}/news-research/summary`, { method: "POST", signal }),
+  getSupplyChain: (symbol: string, signal?: AbortSignal) => request<SupplyGraph>(`/single-stock-overnight/${encodeURIComponent(symbol)}/supply-chain`, { signal }),
+  refreshSupplyChain: (symbol: string, signal?: AbortSignal) => request<{ started: boolean; status: string }>(`/single-stock-overnight/${encodeURIComponent(symbol)}/supply-chain/refresh`, { method: "POST", signal }),
   uploadFile,
   listRuns: () => request<RunListItem[]>("/runs"),
   getRun: (id: string) => request<RunData>(`/runs/${id}`),
@@ -153,6 +161,7 @@ export const api = {
     }),
   getCreatorOpinionFeed: (limit = 50, offset = 0) =>
     request<CreatorOpinionFeedResponse>(`/creator-opinions/feed?limit=${limit}&offset=${offset}`),
+  getCreatorRefreshStatus: () => request<CreatorRefreshStatus>("/creator-opinions/status"),
   getCreatorSectorSignals: (days = 7, refresh = false) =>
     request<{ signals: CreatorSectorSignal[] }>(`/creator-opinions/sector-signals?days=${days}&refresh=${refresh}`),
   getCreatorSymbolTags: (symbol: string, days = 3) =>
@@ -161,6 +170,7 @@ export const api = {
     request<PremarketNewsSourceAudit>("/premarket-news/source-audit"),
   getPremarketNewsAutoStatus: () =>
     request<PremarketNewsAutoStatus>("/premarket-news/auto-status"),
+  enrichPremarketNews: () => request<{ started: boolean; status: string }>("/premarket-news/enrich", { method: "POST" }),
   refreshPremarketNews: (body: PremarketNewsRefreshInput) =>
     request<PremarketNewsRefreshResponse>("/premarket-news/refresh", {
       method: "POST",
@@ -220,6 +230,8 @@ export const api = {
   getPriorityBoard: (limit = 8, liquidOnly = true, oversoldOnly = false, forceRefresh = false) =>
     request<PriorityBoardResponse>(`/priority-board?limit=${limit}&liquid_only=${liquidOnly}&oversold_only=${oversoldOnly}&force_refresh=${forceRefresh}`),
   getLongOptionScreen: () => request<LongOptionScreenResponse>("/priority-board/long-options"),
+  getVSwingStatus: () => request<VSwingStatus>("/v-swing/status"),
+  runVSwing: () => request<{ status: string; job_id?: string }>("/v-swing/run", { method: "POST" }),
   getLongOptionScreenStatus: () => request<LongOptionScreenJob>("/priority-board/long-options/status"),
   getLongOptionShadow: () => request<LongOptionShadowScorecard>("/priority-board/long-options/shadow"),
   resolveLongOptionShadow: () => request<{ resolve: { resolved: number; pending_or_immature: number }; scorecard: LongOptionShadowScorecard }>("/priority-board/long-options/shadow/resolve", { method: "POST" }),
@@ -333,6 +345,7 @@ export interface CreatorChannel {
 }
 
 export interface CreatorOpinionRefreshInput {
+  background?: boolean;
   handles?: string[] | null;
   limit_per_channel?: number;
   use_llm?: boolean;
@@ -340,6 +353,9 @@ export interface CreatorOpinionRefreshInput {
 }
 
 export interface CreatorOpinionRefreshResponse {
+  started?: boolean;
+  status?: string;
+  retry_after_seconds?: number;
   started_at?: string;
   finished_at?: string;
   new_videos?: number;
@@ -360,6 +376,19 @@ export interface CreatorOpinionRefreshResponse {
       reason?: string;
     }>;
   }>;
+}
+
+export interface CreatorRefreshStatus extends CreatorOpinionRefreshResponse {
+  phase?: string;
+  processed_channels?: number;
+  total_channels?: number;
+  current_video?: string;
+  pending_analysis?: number;
+  error?: string;
+  message?: string;
+  auto_enabled?: boolean;
+  auto_interval_seconds?: number;
+  max_analyses_per_run?: number;
 }
 
 export interface CreatorTickerView {
@@ -543,6 +572,11 @@ export interface PremarketNewsItem {
   change_pct?: number | null;
   atr_pct?: number | null;
   metadata_status?: "ok" | "price_missing" | "price_unavailable" | string;
+  quote_as_of?: string | null;
+  quote_source?: string | null;
+  quote_is_realtime?: boolean;
+  impact_basis?: string | null;
+  attribution?: { primary?: string; channels?: string[]; promotion?: boolean };
   sector_key?: string;
   sector_name?: string;
   sector_effect?: boolean;
@@ -1333,6 +1367,48 @@ export interface PriorityPick {
   confidence_badge: ConfidenceBadge;
   reason: string;
   detail_url: string;
+  v_swing?: VSwingScore;
+}
+
+export interface VSwingScore {
+  status?: string;
+  lifecycle?: string;
+  today_buy?: boolean;
+  buy?: boolean;
+  sell?: boolean;
+  buy_p?: number;
+  sell_p?: number;
+  buy_threshold?: number;
+  sell_threshold?: number;
+  price_as_of?: string;
+  signal_date?: string;
+  close?: number;
+  earn_warn?: boolean;
+  earnings_unknown?: boolean;
+  r_multiple?: number | null;
+  plan?: { entry: number; stop: number; target: number; stop_distance_pct: number; stop_too_far: boolean; one_pct_risk_position_pct: number };
+  frozen_plan?: { entry: number; stop: number; target: number; managed_stop?: number };
+}
+
+export interface VSwingChartSnapshot {
+  status?: string;
+  available?: boolean;
+  session?: string;
+  generated_at?: string;
+  pattern_supported?: boolean;
+  score?: VSwingScore;
+  markers?: TradeMarker[];
+}
+
+export interface VSwingStatus {
+  enabled?: boolean;
+  rank_today_first?: boolean;
+  job: { status: string; error_type?: string; finished_at?: string };
+  snapshot: { session?: string; generated_at?: string; today_buys?: number; open_buys?: number; pattern_supported?: boolean;
+    profit_calibration?: { status?: string; eligible?: boolean; train_n?: number; test_n?: number } };
+  validation: { experimental?: boolean; data_audit?: { supplied_labels?: number; used_buy?: number; used_sell?: number; symbols?: number };
+    resolved_buys?: number; net_win_rate?: number;
+    group_sides?: Record<string, { rf: { pr_auc?: number; baseline_pr_auc?: number; precision?: number; recall?: number }; logistic: { pr_auc?: number } }> };
 }
 
 export interface NewsItem {
@@ -1370,6 +1446,20 @@ export interface NewsDigest {
   items?: NewsItem[];
   trump?: { mentioned: boolean; count: number; net_score: number; items: NewsItem[] };
   impact?: NewsImpact;
+}
+
+export interface StockNewsArticle {
+  id: string; title_original: string; title_cn: string; source_summary: string;
+  summary_cn: string; sentiment: string; reason: string; publisher: string; source: string; relevance?: string;
+  url?: string | null; published_utc: string; time_basis: string; reported_time: string;
+  content_basis: "source_abstract" | "title_only";
+}
+export interface StockNewsResearchData {
+  symbol: string; available: boolean; count: number; window_days: number; fingerprint: string;
+  news_from?: string | null; news_to?: string | null; note: string; items: StockNewsArticle[];
+  analysis: { status: string; summary_cn?: string; sentiment?: string; generated_at?: string; model?: string;
+    summary_basis?: "title_only" | "mixed" | "source_abstract"; summary_news_ids?: string[];
+    support?: { text: string; news_ids: string[] }[]; risks?: { text: string; news_ids: string[] }[] };
 }
 
 export interface LeaderCompareMember {
@@ -1796,6 +1886,10 @@ export interface DailyAutoStatus {
     data_warnings?: string[];
     completed_universe_count?: number;
     failed_universe_count?: number;
+    skipped_universe_count?: number;
+    cached_price_coverage?: { current?: number; total?: number; ratio?: number };
+    price_repair?: { status?: string; error?: string; phase?: string; available_end?: string | null; reserved_usd?: number } | null;
+    gildata_price_sync?: { status?: string; symbols_written?: number; records_added?: number; rejected_count?: number; rejection_reasons?: Record<string, number>; cooldown_count?: number; pending_count?: number; calls?: number; elapsed_seconds?: number; error?: string; sync_version?: number } | null;
     resumed_universe_count?: number;
     results?: Record<string, DailyPoolResult> | DailyPoolResult[];
     date?: string;

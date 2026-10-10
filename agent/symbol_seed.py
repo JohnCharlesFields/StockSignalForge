@@ -10,6 +10,8 @@ Format per line: ``SYMBOL|Company name|Exchange``
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Dict, List
 
 _SEED_RAW = """
@@ -416,3 +418,14 @@ def load_symbol_seed() -> List[Dict[str, str]]:
             "source": "seed",
         }
     return list(rows.values())
+
+
+def load_symbol_alias_seed() -> List[Dict[str, str]]:
+    """Bundled, source-labelled Chinese names; no network or generated translations."""
+    path = Path(__file__).parent / "config" / "symbol_chinese_aliases.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return [{"symbol": company["symbol"], "alias": name,
+             "alias_kind": company.get("alias_kind", "official_cn"),
+             "source": company.get("source", "official_site"),
+             "source_url": company["source_url"]}
+            for company in data["companies"] for name in company["aliases"]]

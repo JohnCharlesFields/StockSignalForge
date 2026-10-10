@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -17,6 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
+from urllib.parse import urlsplit
 
 
 AGENT_DIR = Path(__file__).resolve().parent
@@ -131,6 +133,20 @@ def ensure_database() -> Path:
 
                 CREATE INDEX IF NOT EXISTS idx_symbol_directory_name
                 ON symbol_directory(name_upper);
+
+                CREATE TABLE IF NOT EXISTS symbol_directory_aliases (
+                    symbol TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    alias_upper TEXT NOT NULL,
+                    alias_kind TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_url TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(symbol, alias_upper, source),
+                    FOREIGN KEY(symbol) REFERENCES symbol_directory(symbol) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_symbol_directory_alias
+                ON symbol_directory_aliases(alias_upper, symbol);
 
                 CREATE TABLE IF NOT EXISTS signal_calibration (
                     calibration_id TEXT PRIMARY KEY,
@@ -575,6 +591,7 @@ def symbol_directory_upsert_many(items: list[dict[str, Any]]) -> int:
     stamp = _utc_now()
     written = 0
     with _DB_LOCK, _connect() as conn:
+        _remember_symbol_directory_names(conn, stamp)
         for item in items:
             symbol = str(item.get("symbol") or "").strip().upper()
             if not symbol:
@@ -611,8 +628,95 @@ def symbol_directory_upsert_many(items: list[dict[str, Any]]) -> int:
                 ),
             )
             written += 1
+        _remember_symbol_directory_names(conn, stamp)
         conn.commit()
     return written
+
+
+def _remember_symbol_directory_names(conn: sqlite3.Connection, stamp: str) -> None:
+    conn.execute("""
+        INSERT OR IGNORE INTO symbol_directory_aliases
+        (symbol, alias, alias_upper, alias_kind, source, updated_at)
+        SELECT symbol, name, name_upper,
+               CASE WHEN name GLOB '*[一-龥]*' THEN 'directory_cn' ELSE 'directory_en' END,
+               'directory:known_name', ?
+        FROM symbol_directory WHERE name != '' AND name != symbol AND LENGTH(name) <= 160
+    """, (stamp,))
+
+
+def _upsert_symbol_aliases(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> int:
+    known = {row[0] for row in conn.execute("SELECT symbol FROM symbol_directory")}
+    stamp = _utc_now()
+    values = []
+    kinds = {"official_cn", "vendor_cn", "common_cn", "directory_cn", "seed_en", "vendor_en", "directory_en"}
+    for item in items:
+        symbol = str(item.get("symbol") or "").strip().upper()
+        alias = str(item.get("alias") or "").strip()
+        kind = str(item.get("alias_kind") or "")
+        source = str(item.get("source") or "").strip()
+        url = str(item.get("source_url") or "")
+        if (symbol not in known or not source or len(source) > 100 or kind not in kinds
+                or not alias or alias.upper() == symbol or len(alias) > 160
+                or alias in {"暂无", "未知", "None", "null", "-", "暂无数据"}
+                or any(ord(c) < 32 for c in alias)):
+            continue
+        if kind == "official_cn" and not url:
+            continue
+        if url:
+            try:
+                parts = urlsplit(url)
+                if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
+                        or parts.query or parts.fragment or len(url) > 1000):
+                    continue
+            except ValueError:
+                continue
+        values.append((symbol, alias, alias.upper(), kind, source, url, stamp))
+    before = conn.total_changes
+    conn.executemany("""
+        INSERT INTO symbol_directory_aliases
+        (symbol, alias, alias_upper, alias_kind, source, source_url, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(symbol, alias_upper, source) DO UPDATE SET
+            alias=excluded.alias, alias_kind=excluded.alias_kind, source_url=excluded.source_url,
+            updated_at=excluded.updated_at
+        WHERE alias != excluded.alias OR alias_kind != excluded.alias_kind OR source_url != excluded.source_url
+    """, values)
+    return conn.total_changes - before
+
+
+def symbol_directory_alias_upsert_many(items: list[dict[str, Any]]) -> int:
+    ensure_database()
+    with _DB_LOCK, _connect() as conn:
+        written = _upsert_symbol_aliases(conn, items)
+        conn.commit()
+    return written
+
+
+def symbol_directory_refresh_aliases(seed: list[dict[str, Any]], verified: list[dict[str, Any]]) -> dict[str, int]:
+    """Background import from bundled identities and already-cached vendor facts."""
+    ensure_database()
+    items = list(verified)
+    items.extend({"symbol": r["symbol"], "alias": r["name"], "alias_kind": "seed_en", "source": "bundled:english"}
+                 for r in seed)
+    with _DB_LOCK, _connect() as conn:
+        _remember_symbol_directory_names(conn, _utc_now())
+        cached = conn.execute("SELECT payload_json FROM kv_cache WHERE cache_key LIKE 'gildata:research:company:%' "
+                              "AND (expires_at IS NULL OR expires_at > ?) LIMIT 5000", (time.time(),)).fetchall()
+        for row in cached:
+            payload = _json_load(row[0], {})
+            if not isinstance(payload, dict) or payload.get("source") != "gildata:company":
+                continue
+            for field in ("name", "name_cn", "short_name"):
+                name = str(payload.get(field) or "").strip()
+                if name:
+                    items.append({"symbol": payload.get("symbol"), "alias": name,
+                                  "alias_kind": "vendor_cn" if re.search(r"[\u4e00-\u9fff]", name) else "vendor_en",
+                                  "source": "gildata:company"})
+        written = _upsert_symbol_aliases(conn, items)
+        conn.commit()
+        count = conn.execute("SELECT COUNT(*), COUNT(DISTINCT CASE WHEN alias_kind LIKE '%_cn' THEN symbol END) "
+                             "FROM symbol_directory_aliases").fetchone()
+    return {"written": written, "alias_count": count[0], "chinese_symbol_count": count[1]}
 
 
 def symbol_directory_blank_pool_exchanges() -> int:
@@ -635,41 +739,94 @@ def symbol_directory_blank_pool_exchanges() -> int:
 
 
 def symbol_directory_search(query: str, limit: int = 8) -> list[dict[str, Any]]:
-    """Fast SQL prefix/substring search over the cached symbol directory."""
-    ensure_database()
+    """Read the local catalog without migrations or the shared writer lock."""
     q = str(query or "").strip().upper()
-    if not q:
+    size = max(0, min(12, int(limit)))
+    if not q or not size or not DB_PATH.exists():
         return []
-    like = f"%{q}%"
-    with _DB_LOCK, _connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT symbol, name, exchange, exchange_display, quote_type, source, has_history
-            FROM symbol_directory
-            WHERE symbol LIKE ? OR name_upper LIKE ?
-            ORDER BY
-                CASE WHEN symbol = ? THEN 0
-                     WHEN symbol LIKE ? THEN 1
-                     WHEN name_upper LIKE ? THEN 2
-                     ELSE 3 END,
-                LENGTH(symbol),
-                symbol
-            LIMIT ?
-            """,
-            (like, like, q, f"{q}%", f"{q}%", max(1, int(limit))),
-        ).fetchall()
-    return [
-        {
+    columns = ", ".join("d." + c for c in ("symbol", "name", "exchange", "exchange_display", "quote_type", "source", "has_history"))
+    rows: list[sqlite3.Row] = []
+    seen: set[str] = set()
+    aliases: dict[str, list[dict[str, Any]]] = {}
+    conn = sqlite3.connect(DB_PATH.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+
+        has_alias_table = conn.execute("SELECT 1 FROM sqlite_master WHERE name='symbol_directory_aliases' AND type='table'").fetchone()
+
+        def append_matches(where: str, args: tuple[Any, ...], from_sql: str = "symbol_directory d") -> None:
+            remaining = size - len(rows)
+            if remaining <= 0:
+                return
+            matches = conn.execute(
+                f"SELECT DISTINCT {columns} FROM {from_sql} WHERE {where} "
+                "ORDER BY LENGTH(d.symbol), d.symbol LIMIT ?",
+                (*args, remaining + len(seen)),
+            ).fetchall()
+            for row in matches:
+                if row["symbol"] not in seen:
+                    seen.add(row["symbol"])
+                    rows.append(row)
+                    if len(rows) == size:
+                        break
+
+        append_matches("symbol = ?", (q,))
+        append_matches("d.symbol >= ? AND d.symbol < ?", (q, q + chr(0x10FFFF)))
+        alias_join = "symbol_directory_aliases a JOIN symbol_directory d ON d.symbol=a.symbol"
+        if has_alias_table:
+            append_matches("a.alias_upper = ?", (q,), alias_join)
+        # Binary ranges use the PK/name/alias indexes; contains is only a fallback.
+        append_matches("d.name_upper >= ? AND d.name_upper < ?", (q, q + chr(0x10FFFF)))
+        if has_alias_table:
+            append_matches("a.alias_upper >= ? AND a.alias_upper < ?", (q, q + chr(0x10FFFF)), alias_join)
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{escaped}%"
+        append_matches("symbol LIKE ? ESCAPE '\\' OR name_upper LIKE ? ESCAPE '\\'", (like, like))
+        if has_alias_table:
+            append_matches("a.alias_upper LIKE ? ESCAPE '\\'", (like,), alias_join)
+            if rows:
+                placeholders = ",".join("?" for _ in rows)
+                details = conn.execute(
+                    f"SELECT symbol,alias,alias_upper,alias_kind,source,source_url FROM symbol_directory_aliases "
+                    f"WHERE symbol IN ({placeholders})", tuple(r["symbol"] for r in rows),
+                ).fetchall()
+                for detail in details:
+                    aliases.setdefault(detail["symbol"], []).append(dict(detail))
+    finally:
+        conn.close()
+    output = []
+    priority = {"official_cn": 0, "vendor_cn": 1, "directory_cn": 2, "common_cn": 3,
+                "vendor_en": 0, "directory_en": 1, "seed_en": 2}
+    for row in rows:
+        names = sorted(aliases.get(row["symbol"], []),
+                       key=lambda a: (priority.get(a["alias_kind"], 9), len(a["alias"]), a["alias"], a["source"]))
+        cn = next((a for a in names if a["alias_kind"].endswith("_cn")), None)
+        english = next((a for a in names if a["alias_kind"].endswith("_en")), None)
+        matches = sorted((a for a in names if q in a["alias_upper"]),
+                         key=lambda a: (a["alias_upper"] != q, not a["alias_upper"].startswith(q),
+                                        priority.get(a["alias_kind"], 9), len(a["alias"]), a["source"]))
+        match = matches[0] if matches else None
+        output.append({
             "symbol": row["symbol"],
             "name": row["name"],
+            "name_cn": cn["alias"] if cn else (row["name"] if re.search(r"[\u4e00-\u9fff]", row["name"]) else None),
+            "name_en": english["alias"] if english else (row["name"] if not re.search(r"[\u4e00-\u9fff]", row["name"]) else None),
+            "name_cn_kind": cn["alias_kind"] if cn else None,
+            "name_cn_source": cn["source"] if cn else None,
+            "name_cn_source_url": cn["source_url"] if cn else None,
+            "matched_alias": match["alias"] if match else None,
+            "alias_kind": match["alias_kind"] if match else None,
+            "alias_source": match["source"] if match else None,
+            "alias_source_url": match["source_url"] if match else None,
             "exchange": row["exchange"],
             "exchange_display": row["exchange_display"],
             "quote_type": row["quote_type"],
             "source": row["source"],
             "has_history": bool(row["has_history"]),
-        }
-        for row in rows
-    ]
+        })
+    return output
 
 
 def user_watchlist_list(include_disabled: bool = False) -> list[dict[str, Any]]:

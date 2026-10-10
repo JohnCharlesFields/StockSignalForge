@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { api, type ConfidenceBadge, type LeaderCompareData, type PredictionScorecard, type PriorityBasketResponse, type PriorityBoardResponse, type PriorityMonitorResponse, type PriorityPick } from "@/lib/api";
 import { authHeaders } from "@/lib/apiAuth";
 import { LongOptionBoard } from "./LongOptionBoard";
+import { VSwingPanel } from "@/components/VSwingPanel";
 
 function fmtAdvShort(v?: number | null): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "--";
@@ -90,6 +91,14 @@ function tagToneClass(tone: "strong" | "good" | "neutral" | "warn" | "bad" | str
 
 function PickTags({ pick }: { pick: PriorityPick }) {
   const tags: Array<{ key: string; label: string; tone?: string; title?: string }> = [];
+  const swing = pick.v_swing;
+  if (swing?.today_buy) tags.push({ key: "v-swing-new", label: "当日新买点·实验", tone: "strong", title: `买点匹配强度 ${pct(swing.buy_p)}；不是盈利胜率` });
+  else if (swing?.lifecycle === "continuing") tags.push({ key: "v-swing-open", label: "波段持续监测", tone: "good" });
+  if (swing?.lifecycle === "concentration_watch") tags.push({ key: "v-swing-cap", label: "集中度·仅观察", tone: "warn", title: "开放买点参考已达5个，未加入开放参考" });
+  if (swing?.sell) tags.push({ key: "v-swing-sell", label: "波段离场参考", tone: "bad" });
+  if (swing?.lifecycle === "conflicting_signals") tags.push({ key: "v-swing-conflict", label: "买卖冲突·观察", tone: "warn" });
+  if (swing?.plan?.stop_too_far && (swing.buy || swing.lifecycle === "continuing")) tags.push({ key: "v-swing-stop", label: "波段止损过远", tone: "warn" });
+  if (swing?.earn_warn) tags.push({ key: "v-swing-event", label: "14日内财报", tone: "warn" });
 
   const badge = BADGE[pick.confidence_badge];
   if (badge) {
@@ -340,10 +349,10 @@ export function PriorityBoard() {
             <h1 className="text-2xl font-semibold tracking-tight">{mode === "stocks" ? "优先级看板" : "单腿期权"}</h1>
             {mode === "stocks" && <>
             <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-              复合优先级 = 相对大盘强度 + 校准胜率（已验证的回调买入信号）+ 组合择时。按"最可能跑赢自身基线"的回调标的排序。
+              以回调信号的历史收益校准概率排列研究优先级，结合波段新买点分组；相对强度与组合择时保留为辅助证据。
             </p>
             <p className="mt-2 max-w-2xl text-xs leading-relaxed text-muted-foreground">
-              当前排名逻辑：先按校准胜率排序；同胜率档内再用优先级分、组合择时、相对强度，以及“市场+流动性+RS前40%”“强于行业ETF”两个软增强标签做微调。软增强不会改写胜率，只进入排序微调和前向兑现对账。
+              当前排名逻辑：最新完整交易日的新实验买点优先；同组按收益校准概率降序，同概率再看优先级。波段买点匹配强度单独展示，不替代盈利或超额概率；过期行情不标记为当日买点。
             </p>
             </>}
           </div>
@@ -407,6 +416,7 @@ export function PriorityBoard() {
         {mode === "options" && <LongOptionBoard stockBoard={board} />}
 
         {mode === "stocks" && <>
+        <VSwingPanel onComplete={() => load()} />
 
         {board && (
           <section className="flex flex-wrap items-center gap-3 rounded-lg border bg-card p-3 text-sm">
@@ -520,7 +530,7 @@ export function PriorityBoard() {
             <div className="mt-2 rounded border border-sky-500/30 bg-sky-500/5 p-2 text-xs leading-relaxed text-muted-foreground">
               <div className="font-medium text-foreground">当前算法口径</div>
               <div>主胜率：只看 pullback_hv 校准曲线，不包含软增强标签。</div>
-              <div>主排名：先按校准胜率，再按优先级/组合择时；若胜率接近，再用“市场+流动性+RS前40%”“强于行业ETF”做小幅排序微调。</div>
+              <div>主排名：当日新实验买点优先，同组严格按原收益校准概率，再按优先级分。v-swing 的 P(buy)/P(sell) 只是标注匹配强度；独立收益校准样本不足时不填新的策略胜率。</div>
               <div>
                 数据来源：
                 <span className="ml-1 font-medium text-foreground">
@@ -672,7 +682,7 @@ export function PriorityBoard() {
                 )}
                 {board?.picks.map((p, i) => (
                   <Fragment key={p.symbol}>
-                  <tr className="border-t align-top transition-colors hover:bg-muted/30">
+                  <tr className={cn("border-t align-top transition-colors hover:bg-muted/30", p.v_swing?.today_buy && "bg-emerald-500/10")}>
                     <td className="px-2.5 py-3 text-muted-foreground">
                       <button
                         type="button"

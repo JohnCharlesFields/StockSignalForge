@@ -87,7 +87,7 @@ class DailyBatchReliabilityTests(unittest.TestCase):
                 "status": "failed" if attempt[0] == 1 and payload.universe == "spx" else "completed",
                 "result": {"llm_review_available_count": 1, "rows": [{"large": "not persisted"}]},
             })
-        def finalize(pools):
+        def finalize(pools, **kwargs):
             if attempt[0] == 1:
                 raise RuntimeError("transient persistence failure")
             return {"snapshot_id": "new", "snapshot_row_count": 2}
@@ -97,6 +97,7 @@ class DailyBatchReliabilityTests(unittest.TestCase):
             patch.object(api, "_research_signal_hub_jobs", {}),
             patch.object(api, "_auto_scan_universe_ids", return_value=["ndx", "spx"]),
             patch.object(api, "_daily_sync_prices", return_value="2026-09-29"),
+            patch.object(api, "_daily_report_price_coverage", return_value={"current_by_universe": {"ndx": ["NVDA"], "spx": ["AAPL"]}}),
             patch.object(api, "cache_get", side_effect=lambda k: copy.deepcopy(records.get(k))),
             patch.object(api, "cache_set", side_effect=lambda k, v: records.update({k: copy.deepcopy(v)})),
             patch.object(api, "_run_research_signal_hub_job", side_effect=scan),
@@ -144,7 +145,9 @@ class DailyBatchReliabilityTests(unittest.TestCase):
             result = api._daily_databento_gap_repair("2026-09-29")
         self.assertTrue(result["ok"])
         self.assertEqual(run.call_args.kwargs["timeout"], 120)
-        self.assertEqual(run.call_args.args[0][-1], "0.0")
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--max-cost-usd") + 1], "0.0")
+        self.assertNotIn("--execute", run.call_args_list[0].args[0])
         self.assertIn("2026-09-30", run.call_args.args[0])
 
     def test_automatic_retry_is_delayed_and_limited(self):
@@ -179,12 +182,16 @@ class DailyBatchReliabilityTests(unittest.TestCase):
             patch.object(api.subprocess, "run", return_value=response) as run,
         ):
             self.assertTrue(api._daily_databento_gap_repair("2026-09-29")["ok"])
-            run.return_value = subprocess.CompletedProcess([], 1, "", "unexpected post-download failure")
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, json.dumps({"estimated_cost_usd": 0.4}), ""),
+                subprocess.CompletedProcess([], 1, "", "unexpected post-download failure"),
+            ]
             self.assertFalse(api._daily_databento_gap_repair("2026-09-29")["ok"])
-            self.assertAlmostEqual(float(run.call_args.args[0][-1]), 0.4)
+            command = run.call_args.args[0]
+            self.assertAlmostEqual(float(command[command.index("--max-cost-usd") + 1]), 0.4)
             exhausted = api._daily_databento_gap_repair("2026-09-29")
             self.assertIn("exhausted", exhausted["error"])
-            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_count, 4)
 
     def test_finalizer_error_retains_completed_stage_measurements(self):
         def fail(pools, out):
@@ -200,6 +207,7 @@ class DailyBatchReliabilityTests(unittest.TestCase):
         frame = pd.DataFrame({"Close": [10]}, index=pd.DatetimeIndex(["2026-09-29"], name="Date"))
         with (
             patch.dict(screen.CONFIG, {"daily_price_cache_only": True}),
+            patch("market_calendar.most_recent_session", return_value=datetime(2026, 9, 29).date()),
             patch.object(screen, "get_daily_history", return_value=(frame, "cache")) as get,
         ):
             screen.cached_history(object(), "NVDA", "6mo")

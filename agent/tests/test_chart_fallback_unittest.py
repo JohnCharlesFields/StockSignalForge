@@ -32,7 +32,7 @@ class ChartFallbackTests(unittest.TestCase):
             patch.object(api_server, "cache_get", return_value=None),
             patch.object(api_server, "cache_set"),
             patch.object(market_data_service, "_massive_get", side_effect=_rate_limit_error()),
-            patch.object(api_server, "get_daily_history", return_value=(_daily_frame(), "twelvedata:incremental")) as history,
+            patch.object(api_server, "get_daily_history", side_effect=[(pd.DataFrame(), "cache:empty"), (_daily_frame(), "twelvedata:incremental")]) as history,
         ):
             result = api_server._single_candles("MRK", "daily")
 
@@ -43,6 +43,18 @@ class ChartFallbackTests(unittest.TestCase):
         self.assertEqual(result["reason"], "massive_http_429")
         self.assertNotIn("SECRET", json.dumps(result))
         self.assertTrue(any(call.kwargs.get("skip_massive") for call in history.call_args_list))
+
+    def test_daily_existing_cache_does_not_call_massive(self) -> None:
+        with (
+            patch.object(api_server, "cache_get", return_value=None),
+            patch.object(api_server, "cache_set"),
+            patch.object(market_data_service, "_massive_get", side_effect=AssertionError("cache-first cannot fetch")) as provider,
+            patch.object(api_server, "get_daily_history", return_value=(_daily_frame(), "cache:ohlcv")),
+        ):
+            result = api_server._single_candles("MRK", "daily")
+        self.assertTrue(result["available"])
+        self.assertIsNone(result["reason"])
+        provider.assert_not_called()
 
     def test_intraday_failure_is_sanitized_and_not_misrepresented_as_daily(self) -> None:
         with (

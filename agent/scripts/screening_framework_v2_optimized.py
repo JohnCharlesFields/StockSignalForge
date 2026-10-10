@@ -2653,6 +2653,10 @@ def cached_history(stock: yf.Ticker, ticker: str, period: str) -> tuple[pd.DataF
         allow_yfinance_fallback=not CONFIG.get("daily_price_cache_only", False),
     )
     if routed is not None and not routed.empty:
+        if CONFIG.get("daily_price_cache_only", False):
+            from market_calendar import most_recent_session
+            if pd.Timestamp(routed.index.max()).date() != most_recent_session():
+                raise ValueError("daily price cache stale; excluded from current-session scan")
         frame = routed.reset_index()
         frame["Date"] = pd.to_datetime(frame["Date"]).dt.tz_localize(None)
         return frame, routed_source
@@ -2707,6 +2711,8 @@ def cached_options(stock: yf.Ticker, ticker: str) -> tuple[tuple[str, ...], str]
                 return expiries, "cache:options"
         except Exception:
             pass
+    if CONFIG.get("daily_price_cache_only", False):
+        return tuple(), "unavailable:daily_cache_only"
     expiries = _cboe_expiries(ticker)
     options_source = "live:cboe_options" if expiries else "live:options"
     if not expiries:
@@ -2749,6 +2755,8 @@ def cached_option_chain(stock: yf.Ticker, ticker: str, expiry: str) -> tuple[pd.
         if calls is not None and puts is not None and not calls.empty and not puts.empty:
             return calls, puts, "cache:option_chain"
 
+    if CONFIG.get("daily_price_cache_only", False):
+        return pd.DataFrame(), pd.DataFrame(), "unavailable:daily_cache_only"
     chain_source = "live:option_chain"
     if CONFIG.get("cboe_option_chain_enabled", True):
         chain_payload = get_cboe_option_chain(ticker, expiry, ttl_seconds=ttl)
@@ -2802,6 +2810,8 @@ def cached_fundamentals(stock: yf.Ticker, ticker: str) -> tuple[dict, str]:
         except Exception:
             pass
 
+    if CONFIG.get("daily_price_cache_only", False):
+        return empty, "unavailable:daily_cache_only"
     snapshot = {**empty, **fetch_fundamentals_live(stock, ticker)}
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -3930,4 +3940,12 @@ if __name__ == "__main__":
     if args.snapshot_only:
         print(json.dumps({"universe": args.universe, "source": SOURCE, "ticker_count": len(TICKERS)}, ensure_ascii=False))
         raise SystemExit(0)
-    main(TICKERS, args.output, SOURCE, MEMBERSHIPS)
+    if args.daily_price_cache_only:
+        from market_data_service import external_data_scope
+        SOURCE = "daily_cache_subset"
+        label = (UNIVERSE_REGISTRY.get(args.universe) or {}).get("label", args.universe)
+        MEMBERSHIPS = universe_memberships(TICKERS, label)
+        with external_data_scope(False):
+            main(TICKERS, args.output, SOURCE, MEMBERSHIPS)
+    else:
+        main(TICKERS, args.output, SOURCE, MEMBERSHIPS)

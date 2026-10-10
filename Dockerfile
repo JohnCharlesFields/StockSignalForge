@@ -45,6 +45,12 @@ RUN set -eux; \
 COPY agent/requirements.txt agent/requirements.txt
 RUN pip install --no-cache-dir -r agent/requirements.txt
 
+# Subtitle extraction needs a JS runtime in the final image as well.
+COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
+COPY agent/requirements-youtube.txt agent/requirements-youtube.txt
+RUN pip install --no-cache-dir --no-deps -r agent/requirements-youtube.txt \
+    && node --version
+
 # Copy project
 COPY pyproject.toml LICENSE README.md ./
 COPY agent/ agent/
@@ -61,7 +67,7 @@ RUN pip install --no-cache-dir --no-build-isolation --no-deps -e .
 # Runtime should not run as root. Keep writable app data directories owned by
 # the service user so named Docker volumes inherit usable permissions.
 RUN useradd --create-home --shell /usr/sbin/nologin vibe \
-    && mkdir -p agent/runs agent/sessions agent/uploads agent/.swarm/runs agent/data_cache/market_data \
+    && mkdir -p agent/runs agent/sessions agent/uploads agent/secrets agent/.swarm/runs agent/data_cache/market_data \
     && chown -R vibe:vibe /app
 USER vibe
 

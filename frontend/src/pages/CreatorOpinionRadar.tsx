@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { ExternalLink, RefreshCw, Radio, TrendingDown, TrendingUp, Users } from "lucide-react";
-import { api, type CreatorChannel, type CreatorOpinionFeedItem, type CreatorSectorSignal } from "@/lib/api";
+import { api, type CreatorChannel, type CreatorOpinionFeedItem, type CreatorSectorSignal, type CreatorRefreshStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 function stanceTone(stance?: string) {
@@ -18,9 +18,9 @@ function Badge({ children, tone = "neutral", title }: { children: React.ReactNod
       title={title}
       className={cn(
         "inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium",
-        tone === "good" && "bg-emerald-500/15 text-emerald-300",
-        tone === "bad" && "bg-rose-500/15 text-rose-300",
-        tone === "warn" && "bg-amber-500/15 text-amber-200",
+        tone === "good" && "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+        tone === "bad" && "bg-rose-500/15 text-rose-700 dark:text-rose-300",
+        tone === "warn" && "bg-amber-500/15 text-amber-700 dark:text-amber-200",
         tone === "neutral" && "bg-muted text-muted-foreground",
       )}
     >
@@ -55,14 +55,16 @@ export function CreatorOpinionRadar() {
   const [running, setRunning] = useState(false);
   const [useLlm, setUseLlm] = useState(true);
   const [lastRun, setLastRun] = useState<string>("");
+  const [job, setJob] = useState<CreatorRefreshStatus>({});
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
-      const [c, f, s] = await Promise.all([
+      const [c, f, s, state] = await Promise.all([
         api.listCreatorChannels(),
         api.getCreatorOpinionFeed(80),
-        api.getCreatorSectorSignals(7, true),
+        api.getCreatorSectorSignals(7, false),
+        api.getCreatorRefreshStatus(),
       ]);
       setChannels(c.channels || []);
       setItems(f.items || []);
@@ -71,6 +73,8 @@ export function CreatorOpinionRadar() {
       setPreviousDate(f.previous_date || null);
       setLatestCount(f.latest_count || 0);
       setPreviousCount(f.previous_count || 0);
+      setJob(state);
+      setRunning(["queued", "running"].includes(state.status || ""));
     } finally {
       setLoading(false);
     }
@@ -78,18 +82,26 @@ export function CreatorOpinionRadar() {
 
   useEffect(() => {
     load().catch(() => setLoading(false));
+    let polling = false;
+    const timer = window.setInterval(async () => {
+      if (polling) return;
+      polling = true;
+      try { await load(true); } catch { /* Keep the last readable feed. */ }
+      finally { polling = false; }
+    }, 10000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const refresh = async () => {
     setRunning(true);
     setLastRun("");
     try {
-      const res = await api.refreshCreatorOpinions({ limit_per_channel: 1, use_llm: useLlm, force: false });
-      setLastRun(`新增视频 ${res.new_videos ?? 0} 条 · 字幕 ${res.transcripts_ready ?? 0} 条 · 观点 ${res.opinions_ready ?? 0} 条`);
-      await load();
+      const res = await api.refreshCreatorOpinions({ limit_per_channel: 3, use_llm: useLlm, force: false, background: true });
+      setJob(res);
+      setLastRun(res.status === "cooldown" ? `刚刚检查过，请 ${res.retry_after_seconds ?? 300} 秒后再试` : "后台更新已提交，新视频会先显示，字幕与观点随后补齐");
+      await load(true);
     } catch (error) {
       setLastRun(error instanceof Error ? error.message : "刷新失败");
-    } finally {
       setRunning(false);
     }
   };
@@ -156,6 +168,21 @@ export function CreatorOpinionRadar() {
       </div>
 
       {lastRun && <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{lastRun}</div>}
+      <div className="space-y-2 border-y py-3 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span>{job.auto_enabled ? `Docker运行时约每 ${Math.round((job.auto_interval_seconds || 3600) / 60)} 分钟检查新视频` : "自动更新已关闭"}</span>
+          <span>{running ? `${job.phase === "analyze" ? "提炼观点" : "发现视频"} · ${job.processed_channels ?? 0}/${job.total_channels ?? channels.length} 位` : ({ completed: "更新完成", partial: "部分完成，字幕或列表待补齐", failed: "更新失败，保留历史记录", interrupted: "上次更新被中断，可重新更新", cooldown: "等待下次检查" }[job.status || ""] || "尚未更新")}</span>
+          <span>新增 {job.new_videos ?? 0} · 本轮观点 {job.opinions_ready ?? 0} · 本轮待提炼 {job.pending_analysis ?? 0}</span>
+          {job.finished_at && <span>最近完成 {fmtDate(job.finished_at)}</span>}
+        </div>
+        {job.current_video && <p className="break-words">正在处理：{job.current_video}</p>}
+        <div className="flex flex-wrap gap-x-4 gap-y-2">
+          {channels.map(channel => <span key={channel.handle} className="break-words">
+            <strong className="font-medium text-foreground">{channel.name || channel.handle}</strong> · 检查 {fmtDate(channel.last_checked_at)}
+            {channel.metadata?.last_error ? <span className="ml-1 text-amber-600 dark:text-amber-300">列表暂不可用</span> : null}
+          </span>)}
+        </div>
+      </div>
 
       <section className="rounded-md border bg-card">
         <div className="flex items-center justify-between border-b px-3 py-2">
@@ -166,7 +193,7 @@ export function CreatorOpinionRadar() {
           <div className="text-xs text-muted-foreground">按近 7 日博主观点聚合</div>
         </div>
         <div className="grid gap-2 p-3 md:grid-cols-2 xl:grid-cols-3">
-          {signals.length === 0 && <div className="text-sm text-muted-foreground">暂无赛道信号，先点击“更新最新视频”。</div>}
+          {signals.length === 0 && <div className="text-sm text-muted-foreground">暂无可核验的赛道观点；视频字幕与观点补齐后显示。</div>}
           {signals.map((s) => (
             <div key={`${s.as_of_date}-${s.sector_key}`} className="rounded-md border bg-background/60 p-3">
               <div className="flex items-center justify-between gap-2">
@@ -205,8 +232,8 @@ export function CreatorOpinionRadar() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-semibold">{item.handle}</span>
-                      <Badge tone={item.transcript_status === "ready" ? "good" : "warn"}>字幕 {item.transcript_status}</Badge>
-                      <Badge tone={opinion.available ? "good" : "warn"}>观点 {item.opinion_status}</Badge>
+                      <Badge tone={item.transcript_status === "ready" ? "good" : "warn"}>字幕 {item.transcript_status === "ready" ? "已取得" : item.transcript_status === "failed" ? "暂不可用" : "待提取"}</Badge>
+                      <Badge tone={opinion.available ? "good" : "warn"}>观点 {opinion.available ? "已提炼" : "待补齐"}</Badge>
                       {item.language && <Badge>{item.language}</Badge>}
                       {item.chars ? <Badge>{compactNumber(item.chars)} 字</Badge> : null}
                     </div>
@@ -219,7 +246,9 @@ export function CreatorOpinionRadar() {
                 </div>
 
                 {opinion.summary && <p className="rounded-md bg-muted/35 p-2 text-sm leading-6 text-muted-foreground">{opinion.summary}</p>}
-                {opinion.reason && <p className="rounded-md bg-amber-500/10 p-2 text-sm text-amber-200">{opinion.reason}</p>}
+                {opinion.reason && <p className="rounded-md bg-amber-500/10 p-2 text-sm text-amber-700 dark:text-amber-200">{opinion.reason.replace(/^[a-z_]+:\s*/, "")}</p>}
+                {!opinion.available && !opinion.reason && <p className="text-xs text-muted-foreground">视频已发现，字幕与观点尚未完成；不根据标题推断博主观点。</p>}
+                {item.error && !opinion.reason && <p className="text-xs text-amber-600 dark:text-amber-300">{item.error}</p>}
 
                 <div className="grid gap-3 lg:grid-cols-2">
                   <div>

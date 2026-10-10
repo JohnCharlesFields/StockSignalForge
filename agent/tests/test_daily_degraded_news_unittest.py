@@ -145,6 +145,7 @@ class DailyDegradedNewsTests(unittest.TestCase):
             return {"title_cn": "上调指引", "status": "translated"}
         with (
             patch.object(news, "connection", connection), patch.object(news, "ensure_database"),
+            patch("gildata_shadow_service.fetch_news_supplement", return_value=([], {"status": "disabled"})),
             patch.object(news, "_universe_symbols", return_value=({"NVDA"}, {}, {}, [], [])),
             patch.object(news, "_fetch_massive_news", return_value=([article], {})),
             patch.object(news, "_fetch_yahoo_news", side_effect=yahoo),

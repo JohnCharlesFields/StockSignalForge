@@ -1,0 +1,4 @@
+# Install after the base requirements; do not upgrade unrelated dependencies.
+# EJS version must match yt-dlp's supported companion version.
+yt-dlp==2026.8.19
+yt-dlp-ejs==0.8.0

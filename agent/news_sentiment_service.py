@@ -81,6 +81,7 @@ def news_digest(symbol: str, days: int = 10, limit: int = 30) -> Dict[str, Any]:
             trump = _is_trump(r)
             item = {
                 "title": (r.get("title") or "")[:200],
+                "description": (r.get("description") or "")[:1600],
                 "publisher": ((r.get("publisher") or {}) or {}).get("name"),
                 "published_utc": r.get("published_utc"),
                 "url": r.get("article_url"),

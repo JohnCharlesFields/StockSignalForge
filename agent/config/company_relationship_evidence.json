@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "note": "Manually reviewed disclosure facts. Listing identity is verified separately; no trading-score effect.",
+  "symbols": {
+    "CSCO": {
+      "source_title": "Cisco Suppliers for Fiscal Year 2025",
+      "source_url": "https://www.cisco.com/c/dam/en_us/about/supply-chain/cisco-supplier-list.pdf",
+      "disclosed_at": null,
+      "report_period": "FY2025",
+      "upstream_note": "Cisco官方FY2025供应商名单，覆盖当年支出前80%；官方明确名单可能包含已不再合作的公司。不是当前订单证明。",
+      "upstream_suppliers": [
+        {"name": "Flex", "detail": "官方FY2025供应商名单列示，可能包含已终止合作关系；不是当前订单证明。"},
+        {"name": "Hon Hai Precision Industry", "detail": "官方FY2025名单列示鸿海精密（台湾），不与A股工业富联601138自动等同。"},
+        {"name": "Broadcom", "detail": "官方FY2025供应商名单列示；未提供具体订单金额。"},
+        {"name": "Coherent", "detail": "官方FY2025供应商名单列示；未提供具体订单金额。"},
+        {"name": "Fabrinet", "detail": "官方FY2025供应商名单列示；不代表当前有效订单。"},
+        {"name": "NVIDIA", "detail": "官方FY2025供应商名单列示；不代表当前有效订单。"}
+      ],
+      "downstream_customers": [],
+      "competitors": []
+    },
+    "AAOI": {
+      "source_title": "AAOI 2025 Form 10-K",
+      "source_url": "https://www.sec.gov/Archives/edgar/data/1158114/000143774926005875/aaoi20251231_10k.htm",
+      "disclosed_at": "2026-02-26",
+      "report_period": "2025-12-31",
+      "upstream_note": "已核对的2025年报未点名上游供应商；不把芯片/元件供应商泛称当作具体公司。",
+      "upstream_suppliers": [],
+      "downstream_customers": [
+        {"name": "Microsoft", "detail": "2025年报披露的客户；不代表当前订单预测"},
+        {"name": "Digicomm", "detail": "2025年报披露的CATV客户"},
+        {"name": "Oracle", "detail": "同份年报披露的2024年重要客户；历史关系，非2025年收入断言"}
+      ],
+      "competitors": [
+        {"name": "Coherent", "detail": "年报披露：在一个或多个产品市场竞争"},
+        {"name": "Lumentum", "detail": "年报披露：在一个或多个产品市场竞争"},
+        {"name": "Intel", "detail": "2025年报列示的竞争公司，不代表所有业务当前直接重合"},
+        {"name": "Eoptolink", "detail": "年报列示的光通信竞争公司"},
+        {"name": "Source Photonics", "detail": "年报列示的竞争公司；上市证券身份未核验"}
+      ]
+    }
+  }
+}

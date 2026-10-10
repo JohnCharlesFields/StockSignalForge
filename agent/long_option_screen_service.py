@@ -159,7 +159,7 @@ def _run_screen() -> None:
         session = get_latest_us_market_close_utc(now).astimezone(EASTERN).date()
         universe = build_leader_snapshot(_CACHE_ROOT, as_of=now)
         _set_job(stage="读取Cboe近一年期权成交量")
-        option_volume = rank_non_seven_stocks(session)
+        option_volume = rank_non_seven_stocks(session, limit=20)
         leaders = {row["symbol"]: row for row in option_volume["leaders"]} if option_volume.get("available") else {}
         symbols = sorted(set(universe["eligible_symbols"]) | set(leaders))
         _set_job(total=len(symbols), stage="读取正股信号")
@@ -173,7 +173,7 @@ def _run_screen() -> None:
                 row = _screen_one(symbol, session, benchmark)
                 if symbol in leaders:
                     row["option_volume_12m"] = leaders[symbol]["contracts_12m"]
-                    row["universe_source"] = "cboe_option_volume_top10"
+                    row["universe_source"] = "cboe_option_volume_top20"
                 else:
                     row["universe_source"] = "magnificent_seven_or_verified_sector_leader"
                 rows.append(row)

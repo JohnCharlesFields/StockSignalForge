@@ -135,3 +135,9 @@ agent/data/peer_earnings_calendar_overrides.json
 # Local research reports
 wiki/*_ZH.md
 wiki/*_AUDIT_*.md
+!wiki/V_SWING_RESEARCH_ZH.md
+!wiki/CALL_PLAN_RESEARCH_ZH.md
+!wiki/RELEASE_20261010_ZH.md
+
+# Private manual training labels; only the empty template is distributed.
+agent/config/v_swing_annotations.json

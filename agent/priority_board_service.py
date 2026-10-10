@@ -38,7 +38,7 @@ from app_database import (
     priority_candidate_slices_for_date,
     signal_calibration_active,
 )
-from market_data_service import download_daily_history, get_daily_history, get_next_earnings
+from market_data_service import download_daily_history, get_daily_history, get_next_earnings, external_data_allowed, external_data_scope
 from signal_calibration import calibrate
 from iv_signal_service import iv_features
 from pullback_parameter_service import ranking_settings
@@ -477,6 +477,8 @@ def _symbol_track(symbol: str) -> Dict[str, Any]:
     except Exception:
         pass
     # yfinance UPGRADE: nicer GICS sector+industry that matches the CN maps.
+    if not external_data_allowed():
+        return out
     # Best-effort only -- never let its flakiness override the reliable result.
     try:
         import yfinance as yf
@@ -493,9 +495,7 @@ def _symbol_track(symbol: str) -> Dict[str, Any]:
 
 
 def prewarm_tracks(symbols: List[str], limit: int = 60) -> Dict[str, int]:
-    """Warm the 赛道 cache for the top symbols in parallel. Runs its lookups in
-    worker threads (external fetch allowed by default there), so it can be called
-    even from inside a cache-only scope on the daily batch."""
+    """Warm track labels while preserving the caller's external-data boundary."""
     seen, todo = set(), []
     for raw in symbols:
         sym = str(raw or "").upper()
@@ -510,9 +510,15 @@ def prewarm_tracks(symbols: List[str], limit: int = 60) -> Dict[str, int]:
     if not todo:
         return {"warmed": 0, "attempted": 0}
     warmed = 0
+    allowed = external_data_allowed()
+
+    def scoped_track(symbol):
+        with external_data_scope(allowed):
+            return _symbol_track(symbol)
+
     try:
         with ThreadPoolExecutor(max_workers=8) as ex:
-            for tr in ex.map(_symbol_track, todo):
+            for tr in ex.map(scoped_track, todo):
                 if isinstance(tr, dict) and (tr.get("sector") or tr.get("industry")):
                     warmed += 1
     except Exception:
@@ -1105,11 +1111,15 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
         cached = cache_get(CACHE_KEY)
         if isinstance(cached, dict):
             freshness = _board_freshness(cached.get("data_as_of") or cache_get("market_calendar:last_synced_session"))
-            return {**cached, **freshness, "picks": (cached.get("picks") or [])[:limit], "cache_hit": True}
+            from v_swing_service import attach_board
+            view = attach_board({**cached, **freshness, "cache_hit": True})
+            return {**view, "picks": (view.get("picks") or [])[:limit]}
         if os.getenv("PRIORITY_BOARD_RECOMPUTE_ON_MISS", "0").lower() in {"0", "false", "no"}:
-            slice_board = _board_from_latest_slices(limit)
+            slice_board = _board_from_latest_slices(MAX_CACHED_PICKS)
             if slice_board is not None:
-                return slice_board
+                from v_swing_service import attach_board
+                view = attach_board(slice_board)
+                return {**view, "picks": view["picks"][:limit]}
 
     snapshot = latest_home_dashboard_snapshot() or {}
     rows = (((snapshot.get("payload") or {}).get("rows")) or [])
@@ -1325,4 +1335,6 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
         ),
     }
     cache_set(CACHE_KEY, result, ttl_seconds=CACHE_TTL_SECONDS)
-    return {**result, "picks": result["picks"][:limit]}
+    from v_swing_service import attach_board
+    view = attach_board(result)
+    return {**view, "picks": view["picks"][:limit]}

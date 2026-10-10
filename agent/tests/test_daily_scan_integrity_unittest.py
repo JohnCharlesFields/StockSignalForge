@@ -34,6 +34,7 @@ class DailyScanIntegrityTests(unittest.TestCase):
             return {"slice_rows_written": 1, "candidates": 1}
 
         with (
+            patch("gildata_daily_service.enabled", return_value=False),
             patch.object(market_calendar, "most_recent_session", return_value=session),
             patch.object(api_server, "cache_get", return_value=None),
             patch.object(api_server, "cache_set", side_effect=lambda *args: calls.append(("marker", args[1]))),

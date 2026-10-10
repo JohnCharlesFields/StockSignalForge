@@ -1,9 +1,10 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { type ReactNode, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   Bot,
   Loader2,
+  GitBranch,
   RefreshCw,
   Search,
   ShieldAlert,
@@ -14,14 +15,21 @@ import { toast } from "sonner";
 import { authHeaders } from "@/lib/apiAuth";
 import { cn } from "@/lib/utils";
 import { CandlestickChart } from "@/components/charts/CandlestickChart";
-import { GildataEvidencePanel, type GildataEvidence } from "@/components/GildataEvidence";
+import { GildataConsensusTable, GildataIndustryInfo, type GildataEvidence } from "@/components/GildataEvidence";
+import { CompanyRelations, IndustryCompanies, legacyCompanyRows, type CompanyNetwork } from "@/components/CompanyNetwork";
+import { StockNewsResearch } from "@/components/StockNewsResearch";
 import { api, type DistributionRisk, type EarningsInfo, type PriceBar, type TradeMarker, type NewsDigest } from "@/lib/api";
 
 type AnyRecord = Record<string, any>;
+const SupplyChainGraph = lazy(() => import("@/components/SupplyChainGraph").then(m => ({ default: m.SupplyChainGraph })));
+const CallPlan = lazy(() => import("@/components/CallPlan").then(m => ({ default: m.CallPlan })));
 
 interface SearchItem {
   symbol: string;
   name: string;
+  name_cn?: string | null;
+  name_en?: string | null;
+  name_cn_kind?: string | null;
   exchange?: string;
   exchange_display?: string;
   quote_type?: string;
@@ -131,6 +139,8 @@ interface LeaderCompare {
 }
 
 interface CompanyProfile {
+  company_update?: { status?: string; error?: string | null };
+  company_network?: CompanyNetwork;
   available?: boolean;
   symbol?: string;
   market_session?: string | null;
@@ -250,6 +260,7 @@ interface ThreeMonthComparison {
 }
 
 function fmtNumber(value: unknown, digits = 1) {
+  if (value == null || value === "") return "--";
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number)) return "--";
   return number.toFixed(digits);
@@ -425,10 +436,10 @@ function OptionVolatilityCard({ iv, hv20 }: { iv?: AnyRecord | null; hv20?: numb
         <Metric label="Call / Put Ratio" value={fmtNumber(callPutRatio, 2)} detail={`成交量 Call ${callVolume ?? "--"} / Put ${putVolume ?? "--"}`} />
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Delta" value={fmtNumber(greeks.delta, 3)} detail="ATM call/put 均值，仅供方向敏感度参考" />
-        <Metric label="Gamma" value={fmtNumber(greeks.gamma, 4)} detail="价格变动时 Delta 的变化速度" />
-        <Metric label="Theta" value={fmtNumber(greeks.theta, 3)} detail="时间价值衰减，通常为负" />
-        <Metric label="Vega" value={fmtNumber(greeks.vega, 3)} detail="IV 变化对期权价格的敏感度" />
+        <Metric label="Call / Put Delta" value={`${fmtNumber(iv.call_greeks?.delta, 3)} / ${fmtNumber(iv.put_greeks?.delta, 3)}`} detail="分别展示；Delta 不是盈利概率" />
+        <Metric label="Gamma（ATM均值）" value={fmtNumber(greeks.gamma, 4)} detail="非具体Call；股价每变化$1的Delta变化" />
+        <Metric label="Theta（ATM均值）" value={fmtNumber(greeks.theta, 3)} detail="每股/自然日；一张×100，非固定衰减预测" />
+        <Metric label="Vega（ATM均值）" value={fmtNumber(greeks.vega, 3)} detail="IV变化1个百分点的每股价值变化" />
       </div>
       {massiveFallback ? (
         <div className="mt-3 rounded border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
@@ -549,11 +560,15 @@ export function SingleStockOvernight() {
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [searchComposing, setSearchComposing] = useState(false);
   const [error, setError] = useState("");
   const [watchlisted, setWatchlisted] = useState(false);
   const [watchlistBusy, setWatchlistBusy] = useState(false);
+  const [companyRetryBusy, setCompanyRetryBusy] = useState(false);
   const searchTimer = useRef<number | null>(null);
-  const suppressSearch = useRef(false);
+  const searchController = useRef<AbortController | null>(null);
+  const searchSequence = useRef(0);
+  const searchCache = useRef(new Map<string, { items: SearchItem[]; expiresAt: number }>());
   const searchBoxRef = useRef<HTMLDivElement | null>(null);
   const summaryTimer = useRef<number | null>(null);
   const loadSequence = useRef(0);
@@ -585,7 +600,7 @@ export function SingleStockOvernight() {
   const enrichTimer = useRef<number | null>(null);
   const pollEnrich = (safe: string, attempt = 0, sequence = loadSequence.current) => {
     if (enrichTimer.current) window.clearTimeout(enrichTimer.current);
-    if (attempt > 24) return; // Slow optional sections do not hold up the page.
+    if (attempt > 60) return; // Bounded company retries may outlast the core refresh.
     enrichTimer.current = window.setTimeout(async () => {
       if (sequence !== loadSequence.current) return;
       try {
@@ -619,7 +634,7 @@ export function SingleStockOvernight() {
   useEffect(() => () => {
     loadSequence.current += 1;
     loadController.current?.abort();
-    didDeepLink.current = false;
+    didDeepLink.current = null;
     if (summaryTimer.current) window.clearTimeout(summaryTimer.current);
     if (enrichTimer.current) window.clearTimeout(enrichTimer.current);
   }, []);
@@ -674,10 +689,12 @@ export function SingleStockOvernight() {
     loadController.current?.abort();
     const controller = new AbortController();
     loadController.current = controller;
-    // Selecting a symbol updates `query`; suppress the resulting search so the
-    // suggestion dropdown stays closed instead of immediately re-opening.
-    suppressSearch.current = true;
+    ++searchSequence.current;
+    searchController.current?.abort();
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    setSearching(false);
     setLoading(true);
+    setCompanyRetryBusy(false);
     setError("");
     setSuggestOpen(false);
     setSuggestions([]);
@@ -708,59 +725,98 @@ export function SingleStockOvernight() {
     }
   };
 
-  // Deep-link support: /single-stock-overnight?symbol=AAPL auto-loads on mount
-  // (this is the canonical detail page the priority board links to).
-  const [searchParams] = useSearchParams();
-  const didDeepLink = useRef(false);
-  useEffect(() => {
-    if (didDeepLink.current) return;
-    const linked = searchParams.get("symbol");
-    if (linked && linked.trim()) {
-      didDeepLink.current = true;
-      void load(linked.trim().toUpperCase());
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
-
-  const searchSymbols = async (text: string) => {
-    const safe = text.trim();
-    if (!safe) {
-      setSuggestions([]);
-      return;
-    }
-    // Already on this exact symbol (e.g. arrived via deep-link) — don't pop the
-    // autocomplete for the symbol that's already loaded.
-    if (safe.toUpperCase() === symbol.toUpperCase()) {
-      setSuggestions([]);
-      setSuggestOpen(false);
-      return;
-    }
-    setSearching(true);
+  const retryCompany = async () => {
+    const safe = data?.symbol;
+    if (!safe || companyRetryBusy) return;
+    const sequence = loadSequence.current;
+    setCompanyRetryBusy(true);
     try {
-      const response = await fetch(`/single-stock-overnight/search?q=${encodeURIComponent(safe)}&limit=8`, {
-        headers: authHeaders(),
-      });
-      const payload = await response.json();
-      setSuggestions(Array.isArray(payload.items) ? payload.items : []);
-      setSuggestOpen(true);
-    } catch {
-      setSuggestions([]);
+      const response = await fetch(`/single-stock-overnight/${encodeURIComponent(safe)}/company/refresh`, { method: "POST", headers: authHeaders() });
+      if (!response.ok) throw new Error("公司资料更新请求未成功，请稍后重试");
+      const result = await response.json();
+      if (sequence !== loadSequence.current) return;
+      if (result.status === "cooldown" || result.status === "busy") {
+        toast.info(result.status === "cooldown" ? "刚刚更新过，请约两分钟后重试" : "后台任务较多，请稍后重试");
+        return;
+      }
+      setData(prev => prev?.symbol === safe ? { ...prev, company_profile: { ...prev.company_profile, company_update: { status: result.status } } } : prev);
+      pollEnrich(safe, 0, sequence);
+      toast.success("公司资料后台更新中，完成后自动补齐");
+    } catch (exc) {
+      if (sequence === loadSequence.current) toast.error(exc instanceof Error ? exc.message : "公司资料更新失败");
     } finally {
-      setSearching(false);
+      if (sequence === loadSequence.current) setCompanyRetryBusy(false);
     }
   };
 
+  // Deep-link support: /single-stock-overnight?symbol=AAPL auto-loads on mount
+  // (this is the canonical detail page the priority board links to).
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const didDeepLink = useRef<string | null>(null);
   useEffect(() => {
-    if (suppressSearch.current) {
-      suppressSearch.current = false;
+    const linked = searchParams.get("symbol");
+    if (linked && linked.trim()) {
+      const nextSymbol = linked.trim().toUpperCase();
+      const navigation = `${location.key}:${nextSymbol}`;
+      if (didDeepLink.current === navigation) return;
+      didDeepLink.current = navigation;
+      void load(nextSymbol);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, location.key]);
+
+  useEffect(() => {
+    const sequence = ++searchSequence.current;
+    searchController.current?.abort();
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    setSearching(false);
+    setSuggestions([]);
+    setSuggestOpen(false);
+    const safe = query.trim().toUpperCase();
+    if (searchComposing || !safe || safe === symbol.toUpperCase()) return;
+    const cached = searchCache.current.get(safe);
+    if (cached && cached.expiresAt > Date.now()) {
+      setSuggestions(cached.items);
+      setSuggestOpen(true);
       return;
     }
-    if (searchTimer.current) window.clearTimeout(searchTimer.current);
-    searchTimer.current = window.setTimeout(() => searchSymbols(query), 250);
+    const controller = new AbortController();
+    searchController.current = controller;
+    let timeout: number | undefined;
+    searchTimer.current = window.setTimeout(async () => {
+      setSearching(true);
+      timeout = window.setTimeout(() => controller.abort(), 4000);
+      try {
+        const response = await fetch(`/single-stock-overnight/search?q=${encodeURIComponent(safe)}&limit=8`, {
+          headers: authHeaders(), signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Search unavailable");
+        const payload = await response.json();
+        if (controller.signal.aborted || sequence !== searchSequence.current) return;
+        const items: SearchItem[] = Array.isArray(payload.items) ? payload.items : [];
+        // Empty/cold directories must remain retryable while background seeding finishes.
+        searchCache.current.delete(safe);
+        if (items.length) searchCache.current.set(safe, { items, expiresAt: Date.now() + 5 * 60 * 1000 });
+        if (searchCache.current.size > 40) {
+          searchCache.current.delete(searchCache.current.keys().next().value!);
+        }
+        setSuggestions(items);
+        setSuggestOpen(true);
+      } catch {
+        if (sequence === searchSequence.current) setSuggestions([]);
+      } finally {
+        if (timeout) window.clearTimeout(timeout);
+        if (sequence === searchSequence.current) setSearching(false);
+      }
+    }, 180);
     return () => {
       if (searchTimer.current) window.clearTimeout(searchTimer.current);
+      if (timeout) window.clearTimeout(timeout);
+      controller.abort();
+      ++searchSequence.current;
     };
-  }, [query]);
+  }, [query, symbol, searchComposing]);
 
   const metrics = useMemo(() => data?.correlation?.metrics ?? [], [data]);
   const stats = data?.overnight_alpha?.stats ?? {};
@@ -825,16 +881,28 @@ export function SingleStockOvernight() {
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <input
                 value={query}
-                onChange={(event) => setQuery(event.target.value.toUpperCase())}
+                onChange={(event) => {
+                  ++searchSequence.current;
+                  searchController.current?.abort();
+                  setQuery(searchComposing ? event.target.value : event.target.value.toUpperCase());
+                }}
+                onCompositionStart={() => setSearchComposing(true)}
+                onCompositionEnd={(event) => {
+                  setSearchComposing(false);
+                  setQuery(event.currentTarget.value.toUpperCase());
+                }}
                 onFocus={() => suggestions.length && setSuggestOpen(true)}
                 className="h-10 w-full rounded border bg-card pl-9 pr-8 text-sm outline-none focus:border-primary"
-                placeholder="搜索代码，例如 HOOD"
+                placeholder="代码或公司名，如 AMZN / 亚马逊"
               />
               {searching && <Loader2 className="absolute right-2.5 top-3 h-4 w-4 animate-spin text-muted-foreground" />}
               {suggestOpen && !loading && suggestions.length > 0 && query !== symbol && (
                 <div className="absolute left-0 right-0 top-11 z-20 max-h-72 overflow-auto rounded border bg-card shadow-xl">
                   {suggestions.map((item) => {
-                    const showName = item.name && item.name.toUpperCase() !== item.symbol.toUpperCase();
+                    const displayName = item.name_cn || item.name;
+                    const showName = displayName && displayName.toUpperCase() !== item.symbol.toUpperCase();
+                    const englishName = item.name_en && item.name_en !== displayName ? item.name_en : null;
+                    const nameKind = item.name_cn_kind === "official_cn" ? "官网中文用名" : item.name_cn_kind === "vendor_cn" ? "聚源中文名称" : "搜索别名";
                     const exchange = item.exchange_display || item.exchange;
                     return (
                       <button
@@ -843,10 +911,12 @@ export function SingleStockOvernight() {
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => load(item.symbol)}
                         className="flex w-full items-center justify-between gap-3 border-b px-3 py-2 text-left text-sm last:border-b-0 hover:bg-muted"
+                        title={[item.symbol, displayName, englishName, item.name_cn ? nameKind : null].filter(Boolean).join(" · ")}
                       >
-                        <span className="min-w-0 truncate">
-                          <span className="font-semibold">{item.symbol}</span>
-                          {showName && <span className="ml-2 text-muted-foreground">{item.name}</span>}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate"><span className="font-semibold">{item.symbol}</span>
+                          {showName && <span className="ml-2 text-muted-foreground">{displayName}</span>}</span>
+                          {englishName && <span className="block truncate text-xs text-muted-foreground">{englishName}</span>}
                         </span>
                         {exchange && (
                           <span className="shrink-0 whitespace-nowrap rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
@@ -926,12 +996,13 @@ export function SingleStockOvernight() {
           <DistributionRiskCard risk={data?.distribution_risk} />
 
           <OptionVolatilityCard iv={data?.volatility?.iv} hv20={data?.volatility?.hv20} />
+          <Suspense fallback={<p className="text-xs text-muted-foreground">载入合约计划入口…</p>}><CallPlan key={data?.symbol ?? symbol} symbol={data?.symbol ?? symbol} /></Suspense>
 
-          <NewsCard news={data?.news} />
+          <StockNewsResearch key={data?.symbol ?? symbol} symbol={data?.symbol ?? symbol} legacy={data?.news} />
 
           <EarningsExpectationsCard earnings={(data?.earnings ?? data?.company_profile?.earnings) as EarningsInfo | null | undefined} />
 
-          <CompanyProfileCard profile={data?.company_profile} symbol={data?.symbol ?? symbol} />
+          <CompanyProfileCard profile={data?.company_profile} symbol={data?.symbol ?? symbol} onRetry={retryCompany} retryBusy={companyRetryBusy} />
 
           <LeaderCompareCard compare={data?.leader_compare} />
 
@@ -1171,88 +1242,6 @@ function MetricBenchmarks({ rows }: { rows?: SingleStockResponse["metric_benchma
   );
 }
 
-function sentimentColor(s?: string): string {
-  if (s === "positive") return "text-emerald-600 dark:text-emerald-400";
-  if (s === "negative") return "text-rose-600 dark:text-rose-400";
-  return "text-muted-foreground";
-}
-function sentimentCn(s?: string): string {
-  return s === "positive" ? "正面" : s === "negative" ? "负面" : "中性";
-}
-
-function NewsCard({ news }: { news?: NewsDigest }) {
-  if (!news || !news.available) {
-    return (
-      <section className="rounded border bg-card p-4">
-        <h2 className="font-semibold">舆情 · 近期新闻情绪</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {news?.reason === "not_cached" ? "新闻正在后台更新。"
-            : news?.reason && news.reason !== "no_recent_news" ? "新闻源暂不可用，暂不能判断近期新闻情绪。"
-              : "近 10 日暂无可解析的新闻情绪。"}
-        </p>
-      </section>
-    );
-  }
-  const trump = news.trump;
-  const impact = news.impact;
-  return (
-    <section className="rounded border bg-card p-4">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h2 className="font-semibold">舆情 · 近期新闻情绪</h2>
-        <span className={cn("rounded px-1.5 py-0.5 text-[11px]", (news.neg ?? 0) > (news.pos ?? 0) ? "bg-amber-500/15 text-amber-700 dark:text-amber-300" : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300")}>
-          {news.label}（近10日 {news.n} 条：<span className="text-emerald-600 dark:text-emerald-400">正{news.pos}</span>/<span className="text-rose-600 dark:text-rose-400">负{news.neg}</span>/中{news.neu}）
-        </span>
-      </div>
-
-      {/* D.Trump 提及 —— 醒目置顶 */}
-      {trump?.mentioned && (
-        <div className="mt-2 rounded-md border-2 border-orange-500/60 bg-orange-500/10 p-2.5">
-          <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-orange-700 dark:text-orange-300">
-            <span className="rounded bg-orange-500 px-1.5 py-0.5 text-[11px] text-white">TRUMP 提及</span>
-            近 10 日有 {trump.count} 条提及 · 情绪{trump.net_score > 0.1 ? "偏正" : trump.net_score < -0.1 ? "偏负" : "中性"}（净 {trump.net_score >= 0 ? "+" : ""}{(trump.net_score).toFixed(2)}）
-          </div>
-          <ul className="mt-1.5 space-y-1">
-            {trump.items?.map((it, i) => (
-              <li key={i} className="text-xs">
-                <a href={it.url || "#"} target="_blank" rel="noreferrer" className="text-primary hover:underline">{it.title}</a>
-                <span className={cn("ml-1", sentimentColor(it.sentiment))}>· {sentimentCn(it.sentiment)}</span>
-                {it.published_utc && <span className="ml-1 text-muted-foreground">· {it.published_utc.slice(0, 10)}</span>}
-              </li>
-            ))}
-          </ul>
-          <p className="mt-1 text-[10px] text-orange-700/80 dark:text-orange-300/80">⚠️ 政治人物提及常引发短期、双向的剧烈波动；本系统仅展示，未验证为可交易信号。</p>
-        </div>
-      )}
-
-      {/* 预计股价影响（启发式） */}
-      {impact?.available && (
-        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-          <span className="font-medium">预计短期影响：</span>
-          <span className={cn("font-mono font-semibold", (impact.point_pct ?? 0) >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>
-            {(impact.point_pct ?? 0) >= 0 ? "+" : ""}{((impact.point_pct ?? 0) * 100).toFixed(2)}%（{impact.direction}）
-          </span>
-          <span className="text-muted-foreground">波动带 ±{((impact.band_pct ?? 0) * 100).toFixed(1)}%</span>
-          <span className="text-muted-foreground/80">{impact.basis}</span>
-        </div>
-      )}
-      {impact && !impact.available && <p className="mt-2 text-xs text-muted-foreground/80">{impact.note}</p>}
-      {impact?.available && <p className="mt-0.5 text-[10px] text-muted-foreground/70">{impact.note}</p>}
-
-      {/* 近期新闻列表 */}
-      <div className="mt-3 space-y-1.5">
-        {news.items?.slice(0, 8).map((it, i) => (
-          <div key={i} className="flex flex-wrap items-baseline gap-x-2 text-xs">
-            <span className={cn("font-medium", sentimentColor(it.sentiment))}>{sentimentCn(it.sentiment)}</span>
-            <a href={it.url || "#"} target="_blank" rel="noreferrer" className="text-foreground hover:text-primary hover:underline">{it.title}</a>
-            {it.publisher && <span className="text-muted-foreground">· {it.publisher}</span>}
-            {it.published_utc && <span className="text-muted-foreground/70">· {it.published_utc.slice(0, 10)}</span>}
-          </div>
-        ))}
-      </div>
-      <p className="mt-2 text-[10px] text-muted-foreground/70">情绪来自 Polygon 新闻 AI 标注（启发式，非事实判断）。</p>
-    </section>
-  );
-}
 
 // 每个回撤档位代表什么（多空含义），按比例数值匹配。
 const FIB_MEANING: Record<string, string> = {
@@ -1320,11 +1309,14 @@ function PriceChart({ symbol, currentIv, priceLines, dataDate }: { symbol: strin
   const [markers, setMarkers] = useState<TradeMarker[]>([]);
   const [loading, setLoading] = useState(false);
   const [note, setNote] = useState("");
+  const [swing, setSwing] = useState<import("@/lib/api").VSwingChartSnapshot | null>(null);
+  const [showSwing, setShowSwing] = useState(true);
   useEffect(() => {
     if (!symbol) return;
     let cancelled = false;
     const controller = new AbortController();
     setLoading(true);
+    setSwing(null);
     fetch(`/single-stock-overnight/${encodeURIComponent(symbol)}/candles?timeframe=${tf}`, { headers: authHeaders(), signal: controller.signal })
       .then((r) => r.json())
       .then((resp) => {
@@ -1336,11 +1328,21 @@ function PriceChart({ symbol, currentIv, priceLines, dataDate }: { symbol: strin
         setBars(conv);
         setMarkers((resp?.markers || []) as TradeMarker[]);
         setNote(resp?.note || "");
+        setSwing(tf === "daily" ? resp?.v_swing ?? null : null);
       })
       .catch(() => { if (!cancelled) { setBars([]); setMarkers([]); setNote("行情加载失败"); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; controller.abort(); };
   }, [symbol, tf, dataDate]);
+  const swingPlan = swing?.score?.lifecycle === "conflicting_signals" || !swing?.pattern_supported
+    ? null : swing?.score?.frozen_plan ?? (swing?.score?.buy ? swing?.score?.plan : null);
+  const swingLines = showSwing && tf === "daily" && swingPlan ? [
+    { price: swingPlan.entry, label: "managed_stop" in swingPlan && swingPlan.managed_stop === swingPlan.entry ? "波段入场 / 保本" : "波段入场基准", color: "#0284c7", dashed: true },
+    { price: swingPlan.stop, label: "波段冻结止损", color: "#e11d48", dashed: true },
+    { price: swingPlan.target, label: "波段止盈 +2R", color: "#059669", dashed: true },
+    ...("managed_stop" in swingPlan && swingPlan.managed_stop != null && swingPlan.managed_stop > swingPlan.stop && swingPlan.managed_stop !== swingPlan.entry
+      ? [{ price: swingPlan.managed_stop, label: "波段保本参考", color: "#d97706", dashed: true }] : []),
+  ] : [];
   return (
     <section className="rounded border bg-card p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1357,13 +1359,33 @@ function PriceChart({ symbol, currentIv, priceLines, dataDate }: { symbol: strin
           ))}
         </div>
       </div>
+      {tf === "daily" && swing?.status !== "disabled" && <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
+        <label className="inline-flex items-center gap-2"><input type="checkbox" checked={showSwing} onChange={e => setShowSwing(e.target.checked)} />波段买卖点 · 实验</label>
+        {swing?.score?.today_buy && <span className="font-semibold text-emerald-700 dark:text-emerald-300">最新交易日新买点</span>}
+        {swing?.score?.lifecycle === "continuing" && <span>持续监测 {swing.score.r_multiple != null ? `${swing.score.r_multiple.toFixed(2)}R` : ""}</span>}
+        {swing?.score?.sell && <span className="text-rose-700 dark:text-rose-300">持仓离场参考</span>}
+        {swing?.score?.status === "stale" && <span className="text-amber-700 dark:text-amber-300">行情过期，不作为当日买点</span>}
+        {swing?.score?.lifecycle === "conflicting_signals" && <span className="text-amber-700 dark:text-amber-300">买卖冲突，观察</span>}
+        {swing?.score?.lifecycle === "concentration_watch" && <span className="text-amber-700 dark:text-amber-300">集中度观察，未列入开放买点参考</span>}
+        {swing?.score?.buy_p != null && <span>买/卖匹配强度 {(swing.score.buy_p*100).toFixed(1)}% / {((swing.score.sell_p ?? 0)*100).toFixed(1)}%</span>}
+      </div>}
+      {tf === "daily" && showSwing && swingPlan && <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums">
+        <span>参考入场 ${swingPlan.entry.toFixed(2)}</span>
+        <span className="text-rose-700 dark:text-rose-300">冻结止损 ${swingPlan.stop.toFixed(2)}</span>
+        <span className="text-emerald-700 dark:text-emerald-300">+2R 止盈 ${swingPlan.target.toFixed(2)}</span>
+        <span>止损距离 {((swingPlan.entry-swingPlan.stop)/swingPlan.entry*100).toFixed(1)}%</span>
+        <span>1%账户风险对应仓位 {(swingPlan.entry/(swingPlan.entry-swingPlan.stop)).toFixed(1)}%</span>
+        {swing?.score?.earn_warn && <span className="text-amber-700 dark:text-amber-300">14日内财报</span>}
+        {swing?.score?.earnings_unknown && <span className="text-amber-700 dark:text-amber-300">财报日期未核验</span>}
+      </div>}
       {loading && bars.length === 0 ? (
         <div className="flex h-64 items-center justify-center text-sm text-muted-foreground"><Loader2 className="h-5 w-5 animate-spin" /></div>
       ) : bars.length < 2 ? (
         <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">暂无{TF_LABEL[tf]}行情数据</div>
       ) : (
-        <div className="mt-2"><CandlestickChart data={bars} markers={markers} height={720} initialOverlays={["ema5", "ema10", "ema15", "ema20"]} currentIv={currentIv} priceLines={priceLines} initialRange={tf === "daily" ? "3M" : "ALL"} /></div>
+        <div className="mt-2"><CandlestickChart data={bars} markers={[...markers, ...(showSwing && tf === "daily" ? swing?.markers ?? [] : [])]} height={720} initialOverlays={["ema5", "ema10", "ema15", "ema20"]} currentIv={currentIv} priceLines={[...(priceLines ?? []), ...swingLines]} initialRange={tf === "daily" ? "3M" : "ALL"} /></div>
       )}
+      {tf === "daily" && showSwing && swing?.status !== "disabled" && <p className="mt-2 text-[11px] text-muted-foreground">v-swing 买卖点为实验性手法复刻，回放标记不是实盘成交；匹配强度不是盈利胜率。入场/风控位按最初信号冻结，+1R 后保本调整最早下一交易日生效。卖点仅为持仓离场参考。</p>}
       {note && <p className="mt-1 text-[11px] text-muted-foreground">{note}</p>}
     </section>
   );
@@ -1422,7 +1444,10 @@ function ProfileRow({ label, children }: { label: string; children: ReactNode })
   );
 }
 
-function CompanyProfileCard({ profile, symbol }: { profile?: CompanyProfile; symbol: string }) {
+function CompanyProfileCard({ profile, symbol, onRetry, retryBusy }: { profile?: CompanyProfile; symbol: string; onRetry: () => void; retryBusy: boolean }) {
+  const [showGraph, setShowGraph] = useState(false);
+  const closeGraph = useCallback(() => setShowGraph(false), []);
+  useEffect(() => { setShowGraph(false); }, [symbol]);
   const f = profile?.facts;
   const gil = profile?.gildata_research;
   const analyst = profile?.analyst;
@@ -1432,12 +1457,20 @@ function CompanyProfileCard({ profile, symbol }: { profile?: CompanyProfile; sym
   const useGilTarget = typeof gil?.target_avg_usd === "number" && (gilRecent || typeof analyst?.target_avg_quarter !== "number");
   const gilRating = gil?.ratings;
   const capMeta = profile?.market_cap_meta;
+  const network = profile?.company_network;
+  const updateStatus = profile?.company_update?.status;
+  const updating = retryBusy || ["queued", "running"].includes(updateStatus || "") || network?.refresh_status === "running";
+  const relationStatus = updating ? "running" : network?.status === "partial" || ["partial", "unavailable", "failed"].includes(updateStatus || "") ? "partial" : network?.status || "not_updated";
+  const hasEstimates = Boolean(gil?.evidence?.forecast?.estimates?.some(r => ["eps", "revenue"].includes(r.kind)));
   const capSource = capMeta?.source?.startsWith("gildata") ? "聚源" : capMeta?.source?.startsWith("massive") ? "Massive" : "缓存";
   const hasFacts = f && (f.name || f.sector || f.industry || f.business_summary_en);
   if (!profile?.available && !hasFacts) {
     return (
       <section className="rounded border border-dashed border-muted-foreground/30 bg-card p-4 text-sm text-muted-foreground">
         {symbol} 公司基本面暂不可用。
+        <button type="button" onClick={onRetry} disabled={updating} className="ml-3 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs disabled:opacity-60">
+          {updating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{updating ? "资料更新中" : "更新公司资料"}
+        </button>
       </section>
     );
   }
@@ -1454,15 +1487,22 @@ function CompanyProfileCard({ profile, symbol }: { profile?: CompanyProfile; sym
             {f?.industry && <span className="rounded bg-muted px-2 py-0.5 text-muted-foreground">{f.industry}</span>}
             {profile?.segment_cn && <span className="rounded bg-muted px-2 py-0.5 text-muted-foreground">{profile.segment_cn}</span>}
           </div>
+          <div className="mt-2"><GildataIndustryInfo company={gil?.evidence?.company} /></div>
         </div>
         <div className="shrink-0 text-right text-xs text-muted-foreground">
           <div>市值 <span className="font-semibold text-foreground">{fmtMarketCap(f?.market_cap)}</span></div>
           <div>{capSource} · {capMeta?.data_as_of_date ? `数据 ${capMeta.data_as_of_date}` : capMeta?.fetched_at ? `抓取 ${capMeta.fetched_at.slice(0, 10)}` : "日期未核实"}{capMeta?.stale ? " · 可能过期" : ""}</div>
           {f?.employees ? <div>员工 {f.employees.toLocaleString()}</div> : null}
           {f?.country ? <div>{f.country}</div> : null}
+          <button type="button" onClick={onRetry} disabled={updating} className="mt-2 inline-flex min-h-8 items-center justify-center gap-1.5 rounded border px-2.5 text-xs text-foreground hover:bg-muted disabled:opacity-60" title="更新公司资料、同行参考及关系来源核验，不重跑行情或三层分析">
+            {updating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {updating ? "资料更新中" : "更新公司资料"}
+          </button>
+          <button type="button" onClick={() => setShowGraph(true)} className="ml-2 mt-2 inline-flex min-h-8 items-center justify-center gap-1.5 rounded border px-2.5 text-xs text-foreground hover:bg-muted"><GitBranch className="h-3.5 w-3.5" />供应链图谱</button>
         </div>
       </div>
 
+      {showGraph && <Suspense fallback={<p className="py-2 text-xs text-muted-foreground">图谱组件加载中</p>}><SupplyChainGraph symbol={symbol} onClose={closeGraph} onRefreshCompany={onRetry} /></Suspense>}
       {(profile?.earnings || profile?.analyst || gil) && (
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {profile?.earnings?.next_date && (
@@ -1526,6 +1566,7 @@ function CompanyProfileCard({ profile, symbol }: { profile?: CompanyProfile; sym
       )}
 
       <div className="mt-2 divide-y divide-border/60">
+        {hasEstimates && <ProfileRow label="一致预期"><GildataConsensusTable forecast={gil?.evidence?.forecast} marketDate={profile?.market_session} /></ProfileRow>}
         {gil?.annual_eps_estimates && gil.annual_eps_estimates.length > 0 && !gil.evidence?.forecast?.estimates?.length && (
           <ProfileRow label="年度EPS预期">
             <div className="space-y-1 text-sm">
@@ -1550,11 +1591,16 @@ function CompanyProfileCard({ profile, symbol }: { profile?: CompanyProfile; sym
         {profile?.products && profile.products.length > 0 && (
           <ProfileRow label="主要产品"><TagList items={profile.products} /></ProfileRow>
         )}
+        {(profile?.company_network || profile?.ai_available) && (
+          <>
+            <ProfileRow label="上游供应"><CompanyRelations items={profile.company_network?.relationships?.upstream_suppliers ?? legacyCompanyRows(profile.upstream_suppliers)} emptyNote={profile.company_network?.upstream_note} status={relationStatus} /></ProfileRow>
+            <ProfileRow label="下游客户"><CompanyRelations items={profile.company_network?.relationships?.downstream_customers ?? legacyCompanyRows(profile.downstream_customers)} status={relationStatus} /></ProfileRow>
+            <ProfileRow label="竞争对手"><CompanyRelations items={profile.company_network?.relationships?.competitors ?? legacyCompanyRows(profile.competitors)} status={relationStatus} /></ProfileRow>
+            <ProfileRow label="同业市值"><IndustryCompanies network={profile.company_network} status={relationStatus} /></ProfileRow>
+          </>
+        )}
         {profile?.ai_available && (
           <>
-            <ProfileRow label="上游供应"><TagList items={profile.upstream_suppliers} /></ProfileRow>
-            <ProfileRow label="下游客户"><TagList items={profile.downstream_customers} /></ProfileRow>
-            <ProfileRow label="竞争对手"><TagList items={profile.competitors} /></ProfileRow>
             {profile.moat && <ProfileRow label="核心竞争力">{profile.moat}</ProfileRow>}
             {profile.track_position && <ProfileRow label="赛道地位">{profile.track_position}</ProfileRow>}
           </>
@@ -1566,9 +1612,9 @@ function CompanyProfileCard({ profile, symbol }: { profile?: CompanyProfile; sym
         )}
       </div>
 
-      <GildataEvidencePanel evidence={gil?.evidence} marketDate={profile?.market_session} />
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>{profile?.ai_note}</span>
+        <span>{profile?.ai_available ? "公司画像含 AI 整理；关系已披露与待核验分开标注，行业分类不替代细分同行判断。" : profile?.ai_note || "公司画像待补齐；已取得的聚源资料保留展示。"}</span>
+        {network?.relationships_retained_as_of && <span>本次关系更新未完成，部分名单保留自 {network.relationships_retained_as_of}。</span>}
         {f?.website && (
           <a href={f.website} target="_blank" rel="noreferrer" className="text-primary hover:underline">
             官网 ↗

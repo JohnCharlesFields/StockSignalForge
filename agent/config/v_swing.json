@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "enabled": false,
+  "rank_today_first": true,
+  "n_estimators": 400,
+  "max_depth": 6,
+  "random_state": 7,
+  "threshold_quantile": 0.90,
+  "min_bars": 60,
+  "warmup_bars": 40,
+  "min_positive_labels": 5,
+  "lifecycle_days": 7,
+  "hold_sessions": 10,
+  "round_trip_cost": 0.001,
+  "max_open_buys": 5,
+  "earnings_warning_days": 14,
+  "experiment_only": true,
+  "identity_exclusions": {"SKHY": "证券身份与历史标注对应关系待核验", "SPCX": "证券身份与历史标注对应关系待核验"}
+}

@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -164,9 +165,12 @@ def _write_daily_cache(symbol: str, frame: pd.DataFrame) -> None:
     if frame.empty:
         return
     path = _cache_path("ohlcv_daily", symbol, "csv")
-    temp = path.with_suffix(".tmp")
-    _normalize_daily(frame).to_csv(temp)
-    temp.replace(path)
+    temp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        _normalize_daily(frame).to_csv(temp)
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _period_start(period: str) -> datetime:
@@ -553,13 +557,12 @@ def _implied_vol_from_mid(spot: float, strike: float, dte: int, mid: float, opti
 
 
 def _databento_candidate_sessions(max_days: int = 8) -> list[date]:
-    today = datetime.now(timezone.utc).date()
+    from market_calendar import most_recent_session, previous_trading_day
     out: list[date] = []
-    d = today - timedelta(days=1)
+    d = most_recent_session()
     while len(out) < max_days:
-        if d.weekday() < 5:
-            out.append(d)
-        d -= timedelta(days=1)
+        out.append(d)
+        d = previous_trading_day(d)
     return out
 
 
@@ -597,13 +600,15 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
     if not current_price or current_price <= 0:
         return {"available": False, "source": "databento:opra", "reason": "missing_price"}
 
-    cache_key = f"databento_opra_option_snapshot:v3:{sym}"
-    path = _cache_path("databento_opra_option_snapshot_v3", sym, "json")
-    if _fresh(path, 6 * 3600):
+    path = _cache_path("databento_opra_option_snapshot_v4", sym, "json")
+    legacy_path = _cache_path("databento_opra_option_snapshot_v3", sym, "json")
+    for cached_path in (path, legacy_path):
+        if not _fresh(cached_path, 6 * 3600):
+            continue
         try:
-            cached = json.loads(path.read_text(encoding="utf-8"))
+            cached = json.loads(cached_path.read_text(encoding="utf-8"))
             if isinstance(cached, dict):
-                return {**cached, "cache_hit": True}
+                return {**cached, "cache_hit": True, "legacy_quote_window": cached_path == legacy_path}
         except Exception:
             pass
 
@@ -613,6 +618,15 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
         return {"available": False, "source": "databento:opra", "reason": "sdk_unavailable", "detail": str(exc)[:160]}
 
     client = db.Historical()
+    from scripts.backtest_leader_long_options import CostCappedHistorical
+    # Automatic enrichment must not silently incur new OPRA fees.
+    try:
+        cap = float(os.getenv("DATABENTO_OPRA_SNAPSHOT_MAX_COST_USD", "0"))
+        if not 0 <= cap <= 1:
+            cap = 0.0
+    except ValueError:
+        cap = 0.0
+    feed = CostCappedHistorical(client, _CACHE_ROOT, cap)
     last_error = ""
     for session in _databento_candidate_sessions():
         spot_for_session = _close_on_or_before(sym, session, current_price)
@@ -621,15 +635,17 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
         start = session.isoformat() + "T00:00"
         end = (session + timedelta(days=1)).isoformat() + "T00:00"
         try:
-            defs = client.timeseries.get_range(
-                dataset="OPRA.PILLAR",
+            defs = feed.fetch(
                 symbols=[f"{sym}.OPT"],
                 schema="definition",
                 start=start,
                 end=end,
-                stype_in="parent",
-            ).to_df()
+                stype="parent",
+            )
         except Exception as exc:
+            if isinstance(exc, ValueError) and "cost_cap" in str(exc):
+                return {"available": False, "source": "databento:opra", "reason": "cost_cap",
+                        "detail": "自动IV富集的OPRA费用上限拦截；可在Call计划中手动授权计算", "estimated_cost_usd": feed.estimated_cost}
             last_error = f"{exc.__class__.__name__}: {str(exc)[:180]}"
             continue
         if defs is None or defs.empty:
@@ -671,17 +687,21 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
             continue
 
         try:
-            quote_start = session.isoformat() + "T19:55"
-            quote_end = session.isoformat() + "T20:00"
-            quotes = client.timeseries.get_range(
-                dataset="OPRA.PILLAR",
+            from market_calendar import session_close_et
+            quote_close = session_close_et(session).astimezone(timezone.utc)
+            quote_start = (quote_close - timedelta(minutes=5)).isoformat()
+            quote_end = quote_close.isoformat()
+            quotes = feed.fetch(
                 symbols=raw_symbols,
                 schema="cbbo-1m",
                 start=quote_start,
                 end=quote_end,
-                stype_in="raw_symbol",
-            ).to_df()
+                stype="raw_symbol",
+            )
         except Exception as exc:
+            if isinstance(exc, ValueError) and "cost_cap" in str(exc):
+                return {"available": False, "source": "databento:opra", "reason": "cost_cap",
+                        "detail": "自动IV富集的OPRA费用上限拦截；可在Call计划中手动授权计算", "estimated_cost_usd": feed.estimated_cost}
             last_error = f"{exc.__class__.__name__}: {str(exc)[:180]}"
             continue
         if quotes is None or quotes.empty:
@@ -740,7 +760,7 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
             "underlying_price_for_iv": round(float(spot_for_iv), 4),
             "underlying_price_basis": "put_call_parity" if parity_spot else "daily_close_or_current",
             "current_price": round(float(current_price), 4) if current_price else None,
-            "quote_window_utc": f"{session.isoformat()}T19:55/{session.isoformat()}T20:00",
+            "quote_window_utc": f"{quote_start}/{quote_end}",
             "expiry": legs.get("call", legs.get("put", {})).get("expiry"),
             "dte": legs.get("call", legs.get("put", {})).get("dte"),
             "atm_iv": atm_iv,
@@ -1537,9 +1557,14 @@ def data_source_status() -> dict[str, Any]:
         # Massive grouped-daily (bulk EOD) + per-symbol aggregates lead.
         ohlcv_priority.insert(0, "massive")
         ohlcv_priority.insert(0, "massive_grouped_daily")
+    gildata_daily_configured = os.getenv("GILDATA_DAILY_PRIMARY", "0") == "1" and bool(os.getenv("GILDATA_MCP_TOKEN", "").strip())
+    if gildata_daily_configured:
+        ohlcv_priority.insert(0, "gildata_daily_sync")
     return {
         "ohlcv_priority": ohlcv_priority,
         "configuration_only": True,
+        "gildata_daily": {"enabled": gildata_daily_configured, "mode": "daily_preflight_not_page_fetch",
+                          "validation": "two_overlap_sessions_and_units_checked", "last_sync": cache_get("gildata:daily_last_status")},
         "gildata_reference": {
             "enabled": reference_enabled(),
             "last_refresh": cache_get("gildata:reference_last_status"),

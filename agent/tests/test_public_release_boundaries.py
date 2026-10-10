@@ -28,6 +28,27 @@ def test_branding_does_not_change_existing_database_filename():
     assert app_database.DEFAULT_DB_PATH.name == "easymoneysniper.sqlite3"
 
 
+def test_v_swing_is_opt_in_without_private_labels():
+    config = json.loads((ROOT / "agent/config/v_swing.json").read_text())
+    assert config["enabled"] is False
+    assert not (ROOT / "agent/config/v_swing_annotations.json").exists()
+    assert json.loads((ROOT / "agent/config/v_swing_annotations.example.json").read_text()) == {}
+
+
+def test_v_swing_disabled_board_does_not_read_or_train():
+    from unittest.mock import patch
+    import v_swing_service as swing
+
+    board = {"picks": [{"symbol": "AAPL", "calibrated_probability": 0.5}]}
+    with patch.object(swing, "cache_get", side_effect=AssertionError("disabled cache read")):
+        assert swing.attach_board(board) is board
+
+
+def test_readme_screenshot_links_exist():
+    for name in ("13-v-swing-chart.png", "14-company-network.png"):
+        assert (ROOT / "assets/screenshots/desktop" / name).is_file()
+
+
 def test_public_readmes_use_the_requested_title():
     title = "# 金融机构开发者 × 聚源数据地图 MCP：开源 AI 量化与投研系统。"
     for name in ("README.md", "README_zh.md"):

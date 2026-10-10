@@ -29,6 +29,30 @@ function evidenceStatus(status?: string): string {
     timeout: "限时结束", unavailable: "暂不可用", skipped: "已跳过" } as Record<string, string>)[status ?? ""] ?? "尚未更新";
 }
 
+function batchStatus(status?: string): string {
+  return ({ running: "运行中", queued: "排队中", completed: "已完成", partial: "部分完成",
+    waiting_data: "等待行情发布", skipped: "暂无当日行情", failed: "执行故障", disabled: "已停用",
+    idle: "尚未运行" } as Record<string, string>)[status ?? ""] ?? status ?? "--";
+}
+
+function priceSyncReason(reason: string): string {
+  return ({
+    history_anchor_missing_or_future: "缺少可核验历史锚点",
+    history_gap_exceeds_10_sessions: "历史缺口超过同步范围",
+    invalid_history_index: "历史日期索引异常",
+    non_session_anchor: "历史锚点不是交易日",
+    non_consecutive_anchors: "历史锚点不连续",
+    requested_session_or_overlap_missing: "目标日或重叠日行情未返回",
+    overlap_price_basis_mismatch: "价格口径不一致",
+    overlap_volume_unit_mismatch: "成交量口径不一致",
+    previous_close_basis_mismatch: "昨收口径不一致",
+    large_gap_requires_corporate_action_review: "价格大幅跳变待核验",
+    Timeout: "数据源请求超时",
+    ReadTimeout: "数据源读取超时",
+    HTTPError: "数据源请求被拒绝",
+  } as Record<string, string>)[reason] ?? (reason.startsWith("cache_planning_") ? "单股缓存读取异常" : "数据暂不可用或未通过校验");
+}
+
 export function BatchTasks() {
   const [auto, setAuto] = useState<DailyAutoStatus | null>(null);
   const [calib, setCalib] = useState<SignalCalibrationStatus | null>(null);
@@ -109,6 +133,7 @@ export function BatchTasks() {
     } else if (!live && pollRef.current) {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
+      api.getPriorityBoard(1).then(setBoard).catch(() => {});
     }
   }, [auto?.status]);
 
@@ -163,9 +188,7 @@ export function BatchTasks() {
   const today = auto?.today;
   const lastDate = auto?.last_record?.date;
   const doneToday = lastDate === today && auto?.last_record?.status === "completed";
-  const snapDate = board?.snapshot_id?.match(/(\d{8})/)?.[1];
-  const todayCompact = today?.replace(/-/g, "");
-  const snapIsToday = snapDate && todayCompact && snapDate === todayCompact;
+  const snapIsToday = Boolean(board?.data_as_of && board.data_as_of === auto?.market?.most_recent_session);
   const busy = running || auto?.status === "running" || auto?.status === "queued";
   const poolResults = Object.values(auto?.last_record?.results ?? {});
 
@@ -265,7 +288,7 @@ export function BatchTasks() {
             <h2 className="text-base font-semibold">每日三层扫描</h2>
             <span className={cn("inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium", statusTone(auto?.status))}>
               {auto?.status === "running" || auto?.status === "queued" ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-              {auto?.status ?? "--"}
+              {batchStatus(auto?.status)}
             </span>
             {doneToday && (
               <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
@@ -279,7 +302,7 @@ export function BatchTasks() {
                 className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
               >
                 {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                {auto?.last_record?.status === "failed" || auto?.last_record?.status === "partial" ? "接续未完成池" : "立即运行"}
+                {["failed", "partial", "waiting_data"].includes(auto?.last_record?.status ?? "") ? "接续未完成池" : "立即运行"}
               </button>
               <button
                 onClick={() => runNow(true)}
@@ -310,7 +333,7 @@ export function BatchTasks() {
             <Field label="启用" value={auto?.enabled ? "是" : "否"} />
             <Field label="今天" value={today ?? "--"} />
             <Field label="上次运行日期" value={lastDate ?? "尚无记录"} />
-            <Field label="上次状态" value={auto?.last_record?.status ?? "--"} />
+            <Field label="上次状态" value={batchStatus(auto?.last_record?.status)} />
             <Field label="上次完成时间" value={fmtTime(auto?.last_record?.finished_at)} />
           </dl>
           <div className="mt-3 border-l-2 border-sky-500 pl-3 text-xs">
@@ -321,13 +344,26 @@ export function BatchTasks() {
             {auto?.daily_evidence && <p className="mt-1">后台补充 · 事件 {evidenceStatus(auto.daily_evidence.event_status)} · AI复核 {evidenceStatus(auto.daily_evidence.llm_status)}</p>}
           </div>
           {(auto?.last_record?.data_warnings ?? []).map((warning) => <p key={warning} className="mt-2 text-xs text-amber-700 dark:text-amber-300">{warning}</p>)}
+          {auto?.last_record?.cached_price_coverage && (
+            <p className="mt-2 text-xs text-muted-foreground">当日行情覆盖 {auto.last_record.cached_price_coverage.current ?? 0}/{auto.last_record.cached_price_coverage.total ?? 0} 只；无当日行情的池跳过，未更新部分保留历史结果。</p>
+          )}
+          {auto?.last_record?.gildata_price_sync && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              <p>聚源日线同步：{evidenceStatus(auto.last_record.gildata_price_sync.status)} · 写入 {auto.last_record.gildata_price_sync.symbols_written ?? 0} 只 / {auto.last_record.gildata_price_sync.records_added ?? 0} 条 · 暂未补齐 {auto.last_record.gildata_price_sync.rejected_count ?? 0} 只 · 待处理 {auto.last_record.gildata_price_sync.pending_count ?? 0} 只 · 冷却中 {auto.last_record.gildata_price_sync.cooldown_count ?? 0} 只。既有历史价格不覆盖。</p>
+              {auto.last_record.gildata_price_sync.error && <p className="mt-1">同步暂未完成（{auto.last_record.gildata_price_sync.error}），已补齐的标的继续分析。</p>}
+              {Object.keys(auto.last_record.gildata_price_sync.rejection_reasons ?? {}).length > 0 && <p className="mt-1">未补齐原因：{Object.entries(auto.last_record.gildata_price_sync.rejection_reasons ?? {}).map(([reason, count]) => `${priceSyncReason(reason)} ${count} 只`).join("；")}</p>}
+            </div>
+          )}
+          {auto?.last_record?.price_repair?.status === "waiting_data" && auto.last_record.price_repair.available_end && (
+            <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">Databento 日线发布截至 {fmtTime(auto.last_record.price_repair.available_end)}，目标完整交易日尚未发布，不发起收费下载。</p>
+          )}
           {auto?.last_record?.error && !busy && (
             <div role="alert" className="mt-3 border-l-2 border-amber-500 pl-3 text-sm break-words">
               <p className="font-medium text-amber-700 dark:text-amber-300">
-                {auto.last_record.phase === "price_preflight" ? "行情检查未通过，未启动耗时扫描" : "本次未完整完成，上一份榜单保留"}
+                {auto.last_record.status === "waiting_data" ? "等待完整交易日行情，上一份榜单保留" : auto.last_record.phase === "price_preflight" ? "行情检查未通过，未启动耗时扫描" : "本次未完整完成，上一份榜单保留"}
               </p>
               <p className="mt-1 text-xs text-muted-foreground">{auto.last_record.error}</p>
-              <p className="mt-1 text-xs">完成 {auto.last_record.completed_universe_count ?? 0} 池 · 未完成 {auto.last_record.failed_universe_count ?? 0} 池。
+              <p className="mt-1 text-xs">完成 {auto.last_record.completed_universe_count ?? 0} 池 · 故障 {auto.last_record.failed_universe_count ?? 0} 池 · 暂缺行情 {auto.last_record.skipped_universe_count ?? 0} 池。
                 行情恢复后可接续未完成池；已有完整池结果时可仅恢复榜单。</p>
             </div>
           )}
@@ -345,7 +381,7 @@ export function BatchTasks() {
               <summary className="cursor-pointer font-medium">各池结果 · 本次复用 {auto?.last_record?.resumed_universe_count ?? 0} 池</summary>
               <div className="mt-2 space-y-2">
                 {poolResults.map((pool) => <div key={pool.universe} className="grid grid-cols-[5rem_5rem_1fr] gap-2 border-b pb-1">
-                  <span>{pool.universe}</span><span>{pool.status === "completed" ? "已完成" : "未完成"}</span>
+                  <span>{pool.universe}</span><span>{batchStatus(pool.status)}</span>
                   <span className="break-words text-muted-foreground">{pool.message || "--"}</span>
                 </div>)}
               </div>
@@ -383,7 +419,8 @@ export function BatchTasks() {
           <p className="mt-1 text-xs text-muted-foreground">回调买入榜的候选池来自这份快照；扫描跑完后会换成当天的。</p>
           <dl className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
             <Field label="快照 ID" value={board?.snapshot_id ?? "--"} />
-            <Field label="是否今天" value={snapIsToday ? "是" : "否（用的是上一份）"} tone={snapIsToday ? "ok" : "warn"} />
+            <Field label="行情交易日" value={board?.data_as_of ?? "--"} />
+            <Field label="行情是否最新" value={snapIsToday ? "是" : "否（保留历史榜单）"} tone={snapIsToday ? "ok" : "warn"} />
             <Field label="榜单生成时间" value={fmtTime(board?.generated_at)} />
           </dl>
         </section>

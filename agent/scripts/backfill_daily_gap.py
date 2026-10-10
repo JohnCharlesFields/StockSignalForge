@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import warnings
 from datetime import datetime, timezone
@@ -73,7 +74,22 @@ def backfill(start: str, end: str, execute: bool, max_cost_usd: float, only_symb
         raise RuntimeError("No existing OHLCV cache files were found")
     client = db.Historical()
     try:
+        available = client.metadata.get_dataset_range(dataset=DATASET)
+        available_end = (available.get("schema", {}).get(SCHEMA) or {}).get("end") or available.get("end")
+        if not available_end or pd.Timestamp(end, tz="UTC") > pd.Timestamp(available_end):
+            print(json.dumps({"repair_error": "daily_data_not_published", "phase": "availability",
+                              "download_started": False, "available_end": available_end,
+                              "requested_end": end}), file=sys.stderr, flush=True)
+            raise RuntimeError("Requested complete daily session is not published yet")
+    except Exception as exc:
+        if not isinstance(exc, RuntimeError):
+            print(json.dumps({"repair_error": type(exc).__name__, "phase": "availability",
+                              "download_started": False}), file=sys.stderr, flush=True)
+        raise
+    try:
         cost = client.metadata.get_cost(dataset=DATASET, symbols=symbols, schema=SCHEMA, start=start, end=end)
+        if not math.isfinite(float(cost)) or float(cost) < 0:
+            raise ValueError("Invalid provider cost estimate")
     except Exception as exc:
         print(json.dumps({"repair_error": type(exc).__name__, "phase": "cost_estimate", "download_started": False}), file=sys.stderr, flush=True)
         raise
@@ -88,11 +104,16 @@ def backfill(start: str, end: str, execute: bool, max_cost_usd: float, only_symb
         raise RuntimeError(f"Estimated cost ${cost:.4f} exceeds cap ${max_cost_usd:.4f}")
 
     print(json.dumps({"phase": "download", "download_started": True, "estimated_cost_usd": cost}), file=sys.stderr, flush=True)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        data = client.timeseries.get_range(
-            dataset=DATASET, symbols=symbols, schema=SCHEMA, start=start, end=end,
-        ).to_df()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            data = client.timeseries.get_range(
+                dataset=DATASET, symbols=symbols, schema=SCHEMA, start=start, end=end,
+            ).to_df()
+    except Exception as exc:
+        print(json.dumps({"repair_error": type(exc).__name__, "phase": "download",
+                          "download_started": True}), file=sys.stderr, flush=True)
+        raise
     report["provider_warnings"] = [str(item.message)[:500] for item in caught]
     if data.empty or "symbol" not in data:
         raise RuntimeError("Provider returned no daily bars; cache was not changed")

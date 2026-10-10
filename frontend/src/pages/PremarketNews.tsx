@@ -88,9 +88,11 @@ function NewsCard({
           </div>
           {item.source_provenance?.note && <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{item.source_provenance.note}</p>}
           {poolHint && <div className="mt-1 text-xs text-muted-foreground">来源池：{poolHint}</div>}
+          {item.quote_as_of && <p className="text-xs text-muted-foreground">日收盘参考 · {item.quote_as_of} · {item.quote_source} · 非实时价</p>}
+          {!!item.attribution?.channels?.length && <p className="text-xs text-muted-foreground">销售渠道：{item.attribution.channels.join(" / ")}，非新闻主角</p>}
           {priceMissing && (
             <div className="mt-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
-              行情待补齐：新闻已命中股票池，但当前行情源暂未返回价格。
+              行情后台补齐中；暂未取得可核验价格，保留新闻，不用其他股票行情代替。
             </div>
           )}
         </div>
@@ -155,7 +157,7 @@ function NewsCard({
             <div>
               <div className="text-xs text-muted-foreground">预计开盘影响</div>
               <div className={cn("font-semibold", Number(item.estimated_gap_pct || 0) >= 0 ? "text-emerald-600" : "text-rose-600")}>
-                {pct(item.estimated_gap_pct)}
+                {item.estimated_gap_pct == null ? "不足以量化方向" : pct(item.estimated_gap_pct)}
               </div>
             </div>
             <div>
@@ -234,6 +236,9 @@ export function PremarketNews() {
     try {
       const res = await api.getPremarketNews({ reviewed, limit: 120, min_score: minScore, recent_days: recentDays });
       setItems(res.items || []);
+      if (res.items?.some((item) => item.symbol !== "MARKET" && (!item.current_price || !item.quote_as_of || item.sentiment === "unreviewed"))) {
+        void api.enrichPremarketNews().catch(() => undefined);
+      }
       setSourceWarning(res.source_mix_warning || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -454,9 +459,9 @@ export function PremarketNews() {
                     <div className={cn("text-lg font-semibold", impactClass(score))}>{score.toFixed(1)}</div>
                     <div>
                       <div className={cn("font-semibold", Number(item.estimated_gap_pct || 0) >= 0 ? "text-emerald-600" : "text-rose-600")}>
-                        {pct(item.estimated_gap_pct)}
+                        {item.estimated_gap_pct == null ? "待复核" : pct(item.estimated_gap_pct)}
                       </div>
-                      <div className="text-xs text-muted-foreground">带宽 ±{pct(item.impact_band_pct)}</div>
+                      <div className="text-xs text-muted-foreground">{item.impact_basis === "atr_reference" ? "ATR参考" : "带宽"} ±{pct(item.impact_band_pct)}</div>
                     </div>
                     <div>
                       {item.symbol === "MARKET" ? (
