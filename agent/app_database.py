@@ -1502,16 +1502,17 @@ def priority_candidate_slices_for_date(as_of_date: str | None = None, limit: int
     return out
 
 
-def priority_candidate_recent(days: int = 30) -> list[dict[str, Any]]:
+def priority_candidate_recent(days: int = 30, as_of_date: str | None = None) -> list[dict[str, Any]]:
     ensure_database()
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
             """
             SELECT * FROM priority_candidate_slices
-            WHERE as_of_date >= date('now', ?)
+            WHERE as_of_date >= date(COALESCE(?, date('now')), ?)
+              AND (? IS NULL OR as_of_date <= ?)
             ORDER BY symbol, as_of_date DESC
             """,
-            (f"-{max(1, int(days))} days",),
+            (as_of_date, f"-{max(1, int(days))} days", as_of_date, as_of_date),
         ).fetchall()
     out = []
     for row in rows:
@@ -1555,7 +1556,7 @@ def predictions_resolved(since_date: str | None = None, board_only: bool = True,
     q = ("SELECT as_of_date, symbol, rank, calibrated_prob, horizon_days, forward_return, "
          "baseline_return, excess_return, net_excess, win, beta_adjusted_alpha, "
          "market_liquid_rs_top40, stock_stronger_than_industry, playbook_score, "
-         "market_rs_score, playbook_tags, evaluation_version, net_return FROM predictions WHERE resolved=1")
+         "market_rs_score, playbook_tags, evaluation_version, net_return, forecast_json, created_at, mode FROM predictions WHERE resolved=1")
     params: list[Any] = []
     if board_only:
         q += " AND is_board_pick=1"
@@ -1573,7 +1574,7 @@ def predictions_resolved(since_date: str | None = None, board_only: bool = True,
 
 def predictions_open(board_only: bool = True, mode: str | None = None, evaluation_version: str | None = None) -> list[dict[str, Any]]:
     ensure_database()
-    q = ("SELECT as_of_date, symbol, rank, calibrated_prob, horizon_days, entry_ref_price "
+    q = ("SELECT as_of_date, symbol, rank, calibrated_prob, horizon_days, entry_ref_price, forecast_json, evaluation_version, created_at, mode "
          "FROM predictions WHERE resolved=0")
     params: list[Any] = []
     if board_only:

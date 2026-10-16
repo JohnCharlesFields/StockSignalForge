@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
+import { WorkbenchSurface } from "./Workbench";
 import {
   Activity,
   BarChart3,
@@ -140,7 +141,7 @@ export function Layout() {
   };
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className={cn("flex h-screen bg-background", pathname === "/" && "workbench-shell")}>
       <aside className={cn("flex shrink-0 flex-col border-r bg-card transition-all duration-200", collapsed ? "w-12" : "w-64")}>
         <div className={cn("border-b", collapsed ? "flex justify-center p-2" : "p-4")}>
           <Link to="/" title="金融机构开发者 × 聚源数据地图 MCP：开源 AI 量化与投研系统。" className={cn("flex items-center text-sm font-bold tracking-tight", collapsed ? "justify-center" : "gap-2")}>
@@ -350,7 +351,7 @@ export function Layout() {
         <ConnectionBanner status={sseStatus} retryAttempt={sseRetryAttempt} />
         <TopPickBanner />
         <main className="flex-1 overflow-auto">
-          <Outlet />
+          <WorkbenchSurface active={pathname === "/"}><Outlet /></WorkbenchSurface>
         </main>
       </div>
     </div>

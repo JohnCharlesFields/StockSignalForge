@@ -126,13 +126,21 @@ def _build_rows(path: Path) -> list[dict[str, Any]]:
         score = _num(row.get("pullback_hv_score"), default=float("nan"))
         if not math.isfinite(score):
             continue
+        signal_date = str(row.get("date") or "")[:10]
+        label_date = str(row.get("label_available_at") or row.get("exit_date") or "")[:10]
+        try:
+            if dt.date.fromisoformat(label_date) <= dt.date.fromisoformat(signal_date):
+                raise ValueError("label must mature after the signal")
+        except ValueError as exc:
+            raise ValueError("Each event needs verified exit_date/label_available_at; regenerate legacy input before calibration") from exc
         win = 1 if _num(row.get("net_own_excess")) > 0 else 0
         market_liquid_rs = bool(row.get("market_ok") and row.get("liquid") and row.get("rs_filter"))
         stock_vs_sector = bool(row.get("stock_vs_sector_strong"))
         sector_strong = bool(row.get("sector_strong"))
         rows.append({
             **row,
-            "_date": str(row.get("date")),
+            "_date": signal_date,
+            "_label_available_date": label_date,
             "_year": int(str(row.get("date"))[:4]) if str(row.get("date"))[:4].isdigit() else 0,
             "_win": win,
             "_market_liquid_rs": market_liquid_rs,
@@ -147,6 +155,29 @@ def _build_rows(path: Path) -> list[dict[str, Any]]:
         })
     rows.sort(key=lambda r: (r["_date"], str(r.get("ticker") or "")))
     return rows
+
+
+def _purged_train(rows, test_start, embargo_sessions=10):
+    dates = sorted({r["_date"] for r in rows})
+    earlier = [d for d in dates if d < test_start]
+    cutoff = earlier[-embargo_sessions] if embargo_sessions and len(earlier) >= embargo_sessions else (
+        test_start if not embargo_sessions else (earlier[0] if earlier else test_start)
+    )
+    return [r for r in rows if r["_date"] < cutoff and r["_label_available_date"] < test_start]
+
+
+def _temporal_split(rows, train_frac, embargo_sessions=10):
+    if not 0 < train_frac < 1 or embargo_sessions < 0:
+        raise ValueError("train fraction must be between 0 and 1; embargo must be nonnegative")
+    dates = sorted({r["_date"] for r in rows})
+    if len(dates) < 2:
+        raise ValueError("At least two signal dates are required")
+    boundary = dates[max(1, min(len(dates) - 1, int(len(dates) * train_frac)))]
+    train = _purged_train(rows, boundary, embargo_sessions)
+    test = [r for r in rows if r["_date"] >= boundary]
+    if not train or not test:
+        raise ValueError("Insufficient mature events after temporal purge")
+    return train, test
 
 
 def _matrix(rows: list[dict[str, Any]], features: list[str]) -> np.ndarray:
@@ -224,12 +255,12 @@ def _model_specs(rows: list[dict[str, Any]]) -> list[tuple[str, list[str]]]:
     return specs
 
 
-def _yearly_cv(rows: list[dict[str, Any]], specs: list[tuple[str, list[str]]], min_train: int = 2000) -> list[dict[str, Any]]:
+def _yearly_cv(rows: list[dict[str, Any]], specs: list[tuple[str, list[str]]], min_train: int = 2000, embargo_sessions: int = 10) -> list[dict[str, Any]]:
     years = sorted({int(r.get("_year") or 0) for r in rows if int(r.get("_year") or 0) > 0})
     folds = []
     for year in years:
-        train = [r for r in rows if int(r.get("_year") or 0) < year]
         test = [r for r in rows if int(r.get("_year") or 0) == year]
+        train = _purged_train(rows, min(r["_date"] for r in test), embargo_sessions) if test else []
         if len(train) < min_train or len(test) < 100:
             continue
         fold_models = [_evaluate_model(name, features, train, test) for name, features in specs]
@@ -316,13 +347,12 @@ def main() -> None:
     ap.add_argument("--output-prefix", default="playbook_soft_feature_calibration_260625")
     ap.add_argument("--train-frac", type=float, default=0.70)
     ap.add_argument("--yearly-cv", action="store_true")
+    ap.add_argument("--embargo-sessions", type=int, default=10)
     args = ap.parse_args()
 
     source = Path(args.input)
     rows = _build_rows(source)
-    split = int(len(rows) * args.train_frac)
-    train = rows[:split]
-    test = rows[split:]
+    train, test = _temporal_split(rows, args.train_frac, args.embargo_sessions)
 
     models = _model_specs(rows)
     results = [_evaluate_model(name, features, train, test) for name, features in models]
@@ -346,10 +376,13 @@ def main() -> None:
         "generated_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "input_json": str(source),
         "n_events": len(rows),
-        "split": {"train": len(train), "test": len(test), "train_frac": args.train_frac},
+        "split": {"train": len(train), "test": len(test), "train_frac": args.train_frac,
+                  "test_start": min(r["_date"] for r in test),
+                  "latest_training_label": max(r["_label_available_date"] for r in train),
+                  "embargo_sessions": args.embargo_sessions, "purged": True},
         "feature_note": "sector/stock ETF features are included only when the input JSON has sector_enriched=true event fields.",
         "models": results,
-        "yearly_cv": (_yearly_cv(rows, models)[0] if args.yearly_cv else {"summary": []}),
+        "yearly_cv": (_yearly_cv(rows, models, embargo_sessions=args.embargo_sessions)[0] if args.yearly_cv else {"summary": []}),
         "verdict": verdict,
     }
     RUNS_DIR.mkdir(parents=True, exist_ok=True)

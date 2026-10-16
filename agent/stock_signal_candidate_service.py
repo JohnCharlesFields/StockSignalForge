@@ -7,6 +7,7 @@ turn Chinese UI labels into mojibake.
 from __future__ import annotations
 
 from typing import Any, Dict, List
+from gex_quality import normalize_gex
 
 
 STOCK_SIGNAL_BULLISH_STRATEGIES = {"bull_call_spread", "bull_put_spread", "single_call"}
@@ -133,7 +134,8 @@ def stock_signal_item(
         opportunity_tier = "exclude"
 
     equity_risk_flags = [flag for flag in risk_flags if not _is_option_only_risk(flag)]
-    gamma_high = str(result.get("gamma_risk_level", "")).lower() == "high"
+    gex = normalize_gex(result.get("gamma_exposure"))
+    gamma_high = gex.get("available") and str(gex.get("risk_level", "")).lower() == "high"
     if abs(trend) >= 0.45 or liquidity < 0.15 or gamma_high or len(equity_risk_flags) >= 2:
         risk_level = RISK_HIGH
     elif abs(trend) >= 0.25 or liquidity < 0.35 or equity_risk_flags:
@@ -171,8 +173,8 @@ def stock_signal_item(
         "option_liquidity_score": option_liquidity,
         "liquidity_grade": result.get("liquidity_grade", ""),
         "iv_hv_ratio": float(result.get("iv_hv_ratio", 0) or 0),
-        "gamma_exposure": result.get("gamma_exposure") or {},
-        "gamma_risk_level": result.get("gamma_risk_level", ""),
+        "gamma_exposure": gex,
+        "gamma_risk_level": gex.get("risk_level") if gex.get("available") else "unknown",
         "data_sources": result.get("cache_sources") or {},
         "theme": result.get("theme", ""),
         "source_pools": source_pools,

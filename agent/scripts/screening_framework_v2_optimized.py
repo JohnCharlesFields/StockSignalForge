@@ -39,6 +39,7 @@ from scipy.stats import norm
 
 from fincept_adapters import cboe_chain_to_frames, get_cboe_option_chain
 from market_data_service import get_daily_history
+from gex_quality import finite_number, normalize_gex, unavailable_gex
 import cost_model
 
 warnings.filterwarnings("ignore")
@@ -1065,6 +1066,8 @@ def estimate_gamma_flip(calls: pd.DataFrame, puts: pd.DataFrame, spot: float, fa
     pct = float(CONFIG.get("gex_flip_scan_pct", 0.20) or 0.20)
     grid = np.linspace(max(spot * (1.0 - pct), 0.01), spot * (1.0 + pct), 41)
     values = [estimate_net_gex_at_price(calls, puts, float(price), fallback_iv, dte) for price in grid]
+    if not all(math.isfinite(value) for value in values) or all(value == 0 for value in values):
+        return None
     for idx in range(1, len(grid)):
         prev, curr = values[idx - 1], values[idx]
         if prev == 0:
@@ -1078,6 +1081,25 @@ def estimate_gamma_flip(calls: pd.DataFrame, puts: pd.DataFrame, spot: float, fa
 def gamma_exposure_summary(calls: pd.DataFrame, puts: pd.DataFrame, spot: float, fallback_iv: float, dte: int) -> dict:
     if not CONFIG.get("gex_enabled", True):
         return {"available": False, "reason": "disabled"}
+    if finite_number(spot) is None or spot <= 0 or finite_number(dte) is None or dte <= 0:
+        return unavailable_gex("invalid_gex_inputs")
+    valid_oi_contracts = 0
+    for frame in (calls, puts):
+        for _, row in frame.iterrows():
+            oi = finite_number(row.get("openInterest"))
+            if oi is None or oi < 0:
+                return unavailable_gex("invalid_or_missing_open_interest")
+            if oi > 0:
+                strike = finite_number(row.get("strike"))
+                try:
+                    iv = finite_number(row_iv(row, fallback_iv))
+                except (TypeError, ValueError, OverflowError):
+                    return unavailable_gex("invalid_contract_inputs")
+                if strike is None or strike <= 0 or iv is None or iv <= 0:
+                    return unavailable_gex("invalid_contract_inputs")
+                valid_oi_contracts += 1
+    if not valid_oi_contracts:
+        return unavailable_gex("no_open_interest_exposure")
     call_gex = sum(option_gex_row(row, spot, fallback_iv, dte, "call") for _, row in calls.iterrows())
     put_gex = sum(option_gex_row(row, spot, fallback_iv, dte, "put") for _, row in puts.iterrows())
     net_gex = float(call_gex + put_gex)
@@ -1102,8 +1124,9 @@ def gamma_exposure_summary(calls: pd.DataFrame, puts: pd.DataFrame, spot: float,
         regime = "positive"
         risk_level = "low"
         interpretation = "正 Gamma：做市商再平衡更可能抑制波动，有利于区间/收租类研究假设。"
-    return {
+    return normalize_gex({
         "available": True,
+        "valid_oi_contracts": valid_oi_contracts,
         "source": "estimated_from_option_chain_oi",
         "net_gex": round(net_gex, 2),
         "call_gex": round(float(call_gex), 2),
@@ -1116,7 +1139,7 @@ def gamma_exposure_summary(calls: pd.DataFrame, puts: pd.DataFrame, spot: float,
         "risk_level": risk_level,
         "interpretation_cn": interpretation,
         "limitations": "OI proxy only; yfinance does not expose dealer positioning, intraday GEX, or customer trade direction.",
-    }
+    })
 
 
 def executable_price(

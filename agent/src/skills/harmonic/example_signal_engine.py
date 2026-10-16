@@ -403,18 +403,18 @@ class SignalEngine:
                 result[symbol] = signal
                 continue
 
-            patterns = self._detect(df)
-            for p in patterns:
-                d_idx = p.get("d_index")
-                direction = p.get("direction", "")
-                if d_idx is None:
-                    continue
-                # 确保 d_idx 在 signal index 中
-                if d_idx in signal.index:
-                    if direction == "bullish":
-                        signal.at[d_idx] = 1
-                    elif direction == "bearish":
-                        signal.at[d_idx] = -1
+            seen = set()
+            # Applies to both the optional detector and the centered fallback:
+            # output on first observable confirmation, never on the old D bar.
+            for end in range(self.swing_window * 4, len(df) + 1):
+                for p in self._detect(df.iloc[:end]):
+                    d_idx = p.get("d_index")
+                    direction = p.get("direction", "")
+                    key = (p.get("pattern"), d_idx, direction)
+                    if d_idx not in df.index[:end] or direction not in ("bullish", "bearish") or key in seen:
+                        continue
+                    signal.iloc[end - 1] = 1 if direction == "bullish" else -1
+                    seen.add(key)
 
             result[symbol] = signal
         return result

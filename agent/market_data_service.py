@@ -116,21 +116,21 @@ def _claim(provider: str, per_minute: int, per_day: int) -> bool:
     return True
 
 
-def _drop_price_spikes(out: pd.DataFrame) -> pd.DataFrame:
-    """Drop isolated bad-print bars (e.g. a 10x fat-finger that reverts next day).
+def _flag_price_jumps(out: pd.DataFrame) -> pd.DataFrame:
+    """Keep raw bars; flag large moves using only the preceding session.
 
-    A bar whose Close is >2.5x (or <1/2.5x) BOTH neighbours is almost certainly a
-    corrupt feed print, not a real move. One such bar otherwise blows up ATR,
-    volume profile, pullback scores and calibration for that symbol. Endpoints
-    (first/last bar) are never dropped (NaN neighbour -> not flagged)."""
-    if len(out) < 3 or "Close" not in out:
-        return out
+    A split or real gap is not necessarily a corrupt print. Never retrospectively
+    erase a bar because a later price reverted; historical inputs must be stable.
+    """
     c = pd.to_numeric(out["Close"], errors="coerce")
-    prev_c, next_c = c.shift(1), c.shift(-1)
-    up = (prev_c > 0) & (next_c > 0) & (c > 2.5 * prev_c) & (c > 2.5 * next_c)
-    dn = (prev_c > 0) & (next_c > 0) & (c * 2.5 < prev_c) & (c * 2.5 < next_c)
-    bad = (up | dn).fillna(False)
-    return out[~bad] if bool(bad.any()) else out
+    ratio = c / c.shift(1).where(c.shift(1) > 0)
+    suspect = (c > 0) & ((ratio > 2.5) | (ratio < 1 / 2.5))
+    out.attrs["price_jump_suspects"] = [
+        {"date": ts.date().isoformat(), "available_at": ts.date().isoformat(),
+         "ratio": float(ratio.loc[ts])}
+        for ts in out.index[suspect.fillna(False)]
+    ]
+    return out
 
 
 def _normalize_daily(frame: pd.DataFrame) -> pd.DataFrame:
@@ -150,7 +150,7 @@ def _normalize_daily(frame: pd.DataFrame) -> pd.DataFrame:
     # _merge_daily and corrupt day-change / HV / forward calcs.
     out.index = pd.DatetimeIndex(out.index).normalize()
     out.index.name = "Date"
-    return _drop_price_spikes(out[~out.index.duplicated(keep="last")])
+    return _flag_price_jumps(out[~out.index.duplicated(keep="last")].copy())
 
 
 def _read_daily_cache(symbol: str) -> pd.DataFrame:
@@ -423,11 +423,7 @@ def get_massive_options_snapshot(symbol: str, current_price: float | None = None
         if ctype not in {"call", "put"}:
             continue
         def f(value: Any) -> float | None:
-            try:
-                number = float(value)
-                return number if number == number else None
-            except (TypeError, ValueError):
-                return None
+            return _option_number(value)
         iv = f(item.get("implied_volatility"))
         rows.append({
             "contract": details.get("ticker"),
@@ -502,6 +498,9 @@ def get_massive_options_snapshot(symbol: str, current_price: float | None = None
         "put_strike": put.get("strike") if put else None,
         "call_quote": call,
         "put_quote": put,
+        "call_greeks": {key: call.get(key) for key in ("delta", "gamma", "theta", "vega")} if call else {},
+        "put_greeks": {key: put.get(key) for key in ("delta", "gamma", "theta", "vega")} if put else {},
+        "greeks_source": "massive:option_snapshot",
         "greeks": {
             "delta": avg_field("delta"),
             "gamma": avg_field("gamma"),
@@ -542,9 +541,20 @@ def _bs_option_price(spot: float, strike: float, dte: int, sigma: float, option_
 
 
 def _implied_vol_from_mid(spot: float, strike: float, dte: int, mid: float, option_type: str) -> float | None:
-    if spot <= 0 or strike <= 0 or dte <= 0 or mid <= 0:
+    values = [_option_number(value) for value in (spot, strike, dte, mid)]
+    if any(value is None or value <= 0 for value in values) or option_type not in {"call", "put"}:
         return None
+    spot, strike, dte, mid = values
     lo, hi = 0.01, 5.0
+    tolerance = max(1e-7, mid * 1e-7)
+    try:
+        lower_price = _bs_option_price(spot, strike, dte, lo, option_type)
+        upper_price = _bs_option_price(spot, strike, dte, hi, option_type)
+    except (ValueError, OverflowError, ZeroDivisionError):
+        return None
+    if (_option_number(lower_price) is None or _option_number(upper_price) is None
+            or mid < lower_price - tolerance or mid > upper_price + tolerance):
+        return None
     for _ in range(60):
         mid_sigma = (lo + hi) / 2.0
         price = _bs_option_price(spot, strike, dte, mid_sigma, option_type)
@@ -553,7 +563,89 @@ def _implied_vol_from_mid(spot: float, strike: float, dte: int, mid: float, opti
         else:
             lo = mid_sigma
     out = (lo + hi) / 2.0
-    return round(out, 4) if 0.01 <= out <= 5.0 else None
+    fitted_price = _bs_option_price(spot, strike, dte, out, option_type)
+    return round(out, 4) if abs(fitted_price - mid) <= tolerance else None
+
+
+def _option_number(value: Any) -> float | None:
+    import math
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _option_quote_basis(quote: dict[str, Any]) -> dict[str, Any]:
+    bid, ask = (_option_number(quote.get(key)) for key in ("bid", "ask"))
+    invalid = bool(quote.get("raw_quote_invalid")) or any(
+        quote.get(key) is not None and (_option_number(quote[key]) is None or _option_number(quote[key]) < 0)
+        for key in ("bid", "ask"))
+    basis, price = "missing", None
+    if invalid:
+        basis = "invalid"
+    elif bid and ask:
+        basis = "cbbo_mid" if ask >= bid else "crossed"
+        price = bid / 2 + ask / 2 if basis == "cbbo_mid" else None
+    elif ask:
+        basis, price = "ask_only", ask
+    elif bid:
+        basis, price = "bid_only", bid
+    return {**quote, "bid": bid, "ask": ask, "quote_basis": basis, "raw_quote_invalid": invalid,
+            "iv_price": price, "mid": price if basis == "cbbo_mid" else None}
+
+
+def normalize_databento_iv_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Validate live and cached raw legs without downloading or rewriting history."""
+    import math
+
+    payload = dict(snapshot)
+    legs = {side: _option_quote_basis(payload.get(f"{side}_quote") or {}) for side in ("call", "put")}
+    call, put = legs["call"], legs["put"]
+    parity_spot = None
+    strike = _option_number(call.get("strike"))
+    put_strike = _option_number(put.get("strike"))
+    days = _option_number(call.get("dte", payload.get("dte")))
+    if (call["mid"] is not None and put["mid"] is not None and strike and put_strike
+            and days and days > 0 and abs(strike - put_strike) < 1e-9):
+        parity_spot = _option_number(call["mid"] - put["mid"] + strike * math.exp(-0.04 * days / 365))
+    if parity_spot is not None and parity_spot <= 0:
+        parity_spot = None
+    # A legacy parity spot cannot be reused when either raw quote is invalid.
+    spot = parity_spot or _option_number(payload.get("underlying_price_session"))
+    if spot is None and payload.get("underlying_price_basis") != "put_call_parity":
+        spot = _option_number(payload.get("underlying_price_for_iv"))
+    if spot is None:
+        spot = _option_number(payload.get("current_price"))
+    ivs, bases, warnings = [], [], []
+    for side, leg in legs.items():
+        iv = _implied_vol_from_mid(spot, leg.get("strike"), leg.get("dte", payload.get("dte")),
+                                   leg["iv_price"], side)
+        leg["iv"] = iv
+        payload[f"{side}_quote"] = leg
+        payload[f"{side}_iv"] = iv
+        if iv is not None:
+            ivs.append(iv)
+            bases.append(leg["quote_basis"])
+        elif snapshot.get(f"{side}_quote"):
+            warnings.append(f"{side.title()} 报价无效或无法反推匹配 IV，已排除；不借用另一侧 IV。")
+    indicative = any(basis != "cbbo_mid" for basis in bases)
+    payload.update(available=bool(ivs), atm_iv=round(sum(ivs) / len(ivs), 4) if ivs else None,
+                   underlying_price_for_iv=spot,
+                   underlying_price_basis="put_call_parity" if parity_spot else "daily_close_or_current",
+                   iv_quote_basis="single_sided_reference" if indicative else "cbbo_mid" if ivs else "unavailable",
+                   quote_quality="indicative" if indicative else "two_sided" if ivs else "unavailable",
+                   quote_warnings=warnings,
+                   note="Databento delayed IV: single-sided references are indicative, not CBBO mid. OI/volume unavailable.",
+                   status_cn="单边参考报价反推 IV，非 CBBO 中间价，不能视为双边可成交报价" if indicative
+                   else "已获取 Databento OPRA 延迟双边报价并反推 ATM IV" if ivs
+                   else "报价无效或价格无法反推匹配 IV，暂不采用")
+    if not ivs:
+        payload["reason"] = "invalid_quote_or_unsolved_iv"
+    return payload
 
 
 def _databento_candidate_sessions(max_days: int = 8) -> list[date]:
@@ -597,7 +689,7 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
         return {"available": False, "source": "databento:opra", "reason": "missing_symbol"}
     if not os.environ.get("DATABENTO_API_KEY", "").strip():
         return {"available": False, "source": "databento:opra", "reason": "missing_api_key"}
-    if not current_price or current_price <= 0:
+    if _option_number(current_price) is None or current_price <= 0:
         return {"available": False, "source": "databento:opra", "reason": "missing_price"}
 
     path = _cache_path("databento_opra_option_snapshot_v4", sym, "json")
@@ -608,7 +700,7 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
         try:
             cached = json.loads(cached_path.read_text(encoding="utf-8"))
             if isinstance(cached, dict):
-                return {**cached, "cache_hit": True, "legacy_quote_window": cached_path == legacy_path}
+                return {**normalize_databento_iv_snapshot(cached), "cache_hit": True, "legacy_quote_window": cached_path == legacy_path}
         except Exception:
             pass
 
@@ -630,7 +722,7 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
     last_error = ""
     for session in _databento_candidate_sessions():
         spot_for_session = _close_on_or_before(sym, session, current_price)
-        if not spot_for_session or spot_for_session <= 0:
+        if _option_number(spot_for_session) is None or spot_for_session <= 0:
             continue
         start = session.isoformat() + "T00:00"
         end = (session + timedelta(days=1)).isoformat() + "T00:00"
@@ -655,7 +747,7 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
             df["expiration_dt"] = pd.to_datetime(df["expiration"], errors="coerce").dt.date
             df["dte"] = df["expiration_dt"].apply(lambda x: (x - session).days if pd.notna(x) else None)
             df["strike_price"] = pd.to_numeric(df["strike_price"], errors="coerce")
-            df = df[df["dte"].between(7, 45) & df["strike_price"].notna()]
+            df = df[df["dte"].between(7, 45) & df["strike_price"].map(lambda value: _option_number(value) is not None and value > 0)]
             if df.empty:
                 continue
             expiries = sorted(df[["expiration_dt", "dte"]].drop_duplicates().itertuples(index=False), key=lambda x: abs(int(x.dte) - 21))
@@ -711,44 +803,18 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
             q = quotes[quotes["symbol"].astype(str) == leg["contract"]].tail(1)
             if q.empty:
                 continue
-            bid = float(q.iloc[0].get("bid_px_00")) if pd.notna(q.iloc[0].get("bid_px_00")) else None
-            ask = float(q.iloc[0].get("ask_px_00")) if pd.notna(q.iloc[0].get("ask_px_00")) else None
-            mid = None
-            if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
-                mid = (bid + ask) / 2.0
-            elif ask is not None and ask > 0:
-                mid = ask
-            elif bid is not None and bid > 0:
-                mid = bid
-            leg.update({"bid": bid, "ask": ask, "mid": round(mid, 4) if mid else None})
+            bid, ask = q.iloc[0].get("bid_px_00"), q.iloc[0].get("ask_px_00")
+            leg.update({"bid": bid, "ask": ask})
 
-        parity_spot = None
-        call_leg = legs.get("call") or {}
-        put_leg = legs.get("put") or {}
-        try:
-            if (
-                call_leg.get("mid") is not None
-                and put_leg.get("mid") is not None
-                and call_leg.get("strike") is not None
-                and abs(float(call_leg["strike"]) - float(put_leg.get("strike") or 0)) < 1e-9
-            ):
-                t = max(float(call_leg.get("dte") or 0) / 365.0, 1e-6)
-                parity_spot = float(call_leg["mid"]) - float(put_leg["mid"]) + float(call_leg["strike"]) * (2.718281828459045 ** (-0.04 * t))
-        except Exception:
-            parity_spot = None
-        spot_for_iv = parity_spot if parity_spot and parity_spot > 0 else spot_for_session
-
-        ivs: list[float] = []
-        for side, leg in legs.items():
-            iv = _implied_vol_from_mid(float(spot_for_iv), float(leg["strike"]), int(leg["dte"]), float(leg.get("mid") or 0), side)
-            leg["iv"] = iv
-            if iv is not None:
-                ivs.append(iv)
-        if not ivs:
+        validated = normalize_databento_iv_snapshot({
+            "call_quote": legs.get("call"), "put_quote": legs.get("put"),
+            "underlying_price_session": spot_for_session,
+            "current_price": current_price,
+        })
+        if not validated["available"]:
             last_error = "missing_bid_ask_or_iv"
             continue
 
-        atm_iv = round(sum(ivs) / len(ivs), 4)
         payload = {
             "available": True,
             "source": "databento:opra_delayed",
@@ -757,13 +823,12 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
             "dataset": "OPRA.PILLAR",
             "schema": "definition+cbbo-1m",
             "as_of_date": session.isoformat(),
-            "underlying_price_for_iv": round(float(spot_for_iv), 4),
-            "underlying_price_basis": "put_call_parity" if parity_spot else "daily_close_or_current",
+            "underlying_price_session": spot_for_session,
             "current_price": round(float(current_price), 4) if current_price else None,
             "quote_window_utc": f"{quote_start}/{quote_end}",
             "expiry": legs.get("call", legs.get("put", {})).get("expiry"),
             "dte": legs.get("call", legs.get("put", {})).get("dte"),
-            "atm_iv": atm_iv,
+            "atm_iv": validated["atm_iv"],
             "call_iv": legs.get("call", {}).get("iv"),
             "put_iv": legs.get("put", {}).get("iv"),
             "call_strike": legs.get("call", {}).get("strike"),
@@ -785,6 +850,7 @@ def get_databento_options_snapshot(symbol: str, current_price: float | None = No
             "note": "Databento OPRA delayed quote fallback. IV is inferred from CBBO mid; OI/volume are not returned by this lightweight fallback.",
             "cache_hit": False,
         }
+        payload.update(validated)
         try:
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:

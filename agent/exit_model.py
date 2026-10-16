@@ -10,7 +10,7 @@ therefore use a FIXED hold ``H`` (no look-ahead):
     entry      = close[T]
     exit       = open[T+H]            (mode "close_to_open", default)
     ret        = open[T+H]/close[T] - 1
-    baseline   = mean over all t of (open[t+H]/close[t] - 1)   (same convention)
+    baseline   = mean of same-convention returns already matured at signal time
 
 Backtests (backtest_close_to_open.py) showed the edge is significant across
 H = 3..10 and grows with hold length, peaking around H=8; any fixed hold in the
@@ -78,7 +78,7 @@ def forward_return(close, open_, index: int, horizon: int, mode: Optional[str] =
 
 
 def baseline_forward_returns(close, open_, horizon: int, mode: Optional[str] = None) -> list:
-    """Unconditional same-convention forward returns over every entry day."""
+    """Descriptive full-sample returns, NOT a point-in-time prediction baseline."""
     mode = mode or exit_mode()
     out: list[float] = []
     for i in range(len(close) - horizon):
@@ -86,6 +86,26 @@ def baseline_forward_returns(close, open_, horizon: int, mode: Optional[str] = N
         if r is not None:
             out.append(r)
     return out
+
+
+def known_baseline_series(close, open_, horizon: int, mode: Optional[str] = None):
+    """At each row, average only trades whose exit is already observable.
+
+    Positive shift aligns each exit with its earlier entry. This preserves the
+    existing close-to-open/close convention without reading future prices.
+    """
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+        raise ValueError("horizon must be a positive integer")
+    mode = mode or exit_mode()
+    entry = pd.to_numeric(close, errors="coerce").replace([math.inf, -math.inf], float("nan"))
+    entry = entry.where(entry > 0)
+    exit_price = entry
+    if mode != "close_to_close" and open_ is not None:
+        op = pd.to_numeric(open_, errors="coerce").reindex(entry.index)
+        op = op.replace([math.inf, -math.inf], float("nan"))
+        exit_price = op.where(op > 0, entry)
+    matured = (exit_price / entry.shift(horizon) - 1).replace([math.inf, -math.inf], float("nan"))
+    return matured.expanding(min_periods=1).mean()
 
 
 def aligned_open(frame, close) -> Optional["pd.Series"]:

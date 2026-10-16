@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import math
 import random
+import hashlib
+import json
 from datetime import date, datetime, timezone
 from statistics import mean
 from typing import Any, Dict, List, Optional
@@ -36,12 +38,12 @@ from app_database import (
     latest_home_dashboard_snapshot,
     prediction_resolve, predictions_count, predictions_log_many,
     predictions_open, predictions_pending, predictions_resolved,
-    priority_candidate_recent, priority_candidate_slices_for_date,
+    priority_candidate_latest_date, priority_candidate_recent, priority_candidate_slices_for_date,
     priority_candidate_slices_log,
     signal_calibration_list,
 )
 
-_SCORECARD_CACHE_KEY = "prediction_scorecard:v3"
+_SCORECARD_CACHE_KEY = "prediction_scorecard:v4"
 
 
 def _bust_scorecard_cache() -> None:
@@ -96,6 +98,100 @@ def _playbook_prediction_fields(pick: Dict[str, Any]) -> Dict[str, Any]:
         "market_rs_score": e.get("market_rs_score"),
         "playbook_tags": tag_ids,
     }
+
+
+def _validation_snapshot(board: Dict[str, Any], pick: Dict[str, Any], horizon: int) -> Dict[str, Any]:
+    reference = board.get("ranking_reference")
+    references = pick.get("calibration_references")
+    snapshot = {
+        "schema_version": "forward_version_v1",
+        "ranking_version": board.get("parameter_version"),
+        "ranking_reference": reference if isinstance(reference, dict) else {},
+        "calibration_references": references if isinstance(references, list) else [],
+        "horizon_days": int(horizon),
+        "probability_target": "legacy_close_to_open_own_baseline",
+        "outcome_target": "recorded_next_open_to_open_net_own_baseline",
+        "outcome_rule_version": "recorded_open_v3",
+        "baseline_rule_version": "known_open_baseline_v1",
+        "board_generated_at": board.get("generated_at"),
+    }
+    snapshot["metadata_complete"] = _contract_complete(snapshot)
+    return json.loads(json.dumps(snapshot, allow_nan=False))
+
+
+def _contract_complete(contract: Dict[str, Any]) -> bool:
+    rank = contract.get("ranking_reference")
+    refs = contract.get("calibration_references")
+    return bool(contract.get("schema_version") == "forward_version_v1" and contract.get("ranking_version")
+                and isinstance(rank, dict) and rank.get("formula_version") and rank.get("configuration")
+                and isinstance(refs, list) and refs
+                and all(isinstance(ref, dict) and ref.get("method_version") and ref.get("signal_type")
+                        and ref.get("horizon_days") == contract.get("horizon_days")
+                        and (ref.get("calibration_id") if ref.get("applied") else ref.get("source") == "fallback_sigmoid")
+                        for ref in refs)
+                and contract.get("probability_target") and contract.get("outcome_target")
+                and contract.get("outcome_rule_version") and contract.get("baseline_rule_version"))
+
+
+def _version_cohorts(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from pullback_validation import block_interval
+
+    grouped = {}
+    for row in rows:
+        try:
+            forecast = json.loads(row.get("forecast_json") or "{}")
+        except (TypeError, ValueError):
+            forecast = {}
+        if not isinstance(forecast, dict):
+            forecast = {}
+        contract = forecast.get("validation_contract")
+        contract = contract if isinstance(contract, dict) else {}
+        # Do not backfill absent identities from today's configuration/curves.
+        identity = {k: contract.get(k) for k in (
+            "schema_version", "ranking_version", "ranking_reference", "calibration_references",
+            "probability_target", "outcome_target", "outcome_rule_version", "baseline_rule_version")}
+        identity.update(horizon_days=row["horizon_days"], evaluation_version=row.get("evaluation_version", "legacy"))
+        identity["mode"] = row.get("mode")
+        if not contract:
+            identity["recorded_model_version"] = forecast.get("model_version")
+            identity["recorded_probability_target"] = forecast.get("probability_target")
+        key = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=True).encode()).hexdigest()[:16]
+        if key not in grouped:
+            grouped[key] = (identity, contract, [])
+        grouped[key][2].append(row)
+    result = []
+    for key, (identity, contract, members) in grouped.items():
+        resolved = [r for r in members if r.get("resolved")]
+        by_day = {}
+        for row in resolved:
+            value = _finite(row.get("net_excess"), float("nan"))
+            if math.isfinite(value):
+                by_day.setdefault(row["as_of_date"], []).append(value)
+        net_returns = [_finite(r.get("net_return"), float("nan")) for r in resolved]
+        net_returns = [v for v in net_returns if math.isfinite(v)]
+        excess = [v for values in by_day.values() for v in values]
+        wins = [r["win"] for r in resolved if r.get("win") in (0, 1)]
+        dates = sorted({r["as_of_date"] for r in members})
+        refs = contract.get("calibration_references") or []
+        result.append({
+            "cohort_id": key, "ranking_version": contract.get("ranking_version"),
+            "recorded_model_version": identity.get("recorded_model_version"),
+            "calibration_ids": [r.get("calibration_id") for r in refs if isinstance(r, dict) and r.get("calibration_id")],
+            "metadata_complete": _contract_complete(contract),
+            "horizon_days": identity["horizon_days"], "evaluation_version": identity["evaluation_version"],
+            "mode": identity["mode"],
+            "probability_target": contract.get("probability_target") or identity.get("recorded_probability_target"),
+            "outcome_target": contract.get("outcome_target"),
+            "total": len(members), "resolved": len(resolved), "pending": len(members) - len(resolved),
+            "first_signal_date": dates[0], "last_signal_date": dates[-1],
+            "resolved_dates": len(by_day), "realized_win_rate": mean(wins) if wins else None,
+            "mean_net_return": mean(net_returns) if net_returns else None,
+            "mean_net_excess": mean(excess) if excess else None,
+            "overlap_adjusted_ci": block_interval(by_day, max(1, int(identity["horizon_days"]))),
+            "predicted_win_rate": None, "brier": None,
+            "probability_note": "旧收盘口径概率不用于记录后开盘口径校准；版本信息完整也不代表模型已验证。",
+        })
+    return sorted(result, key=lambda c: (c["last_signal_date"], c["cohort_id"]), reverse=True)
 
 
 def _calibration_audit() -> Dict[str, Any]:
@@ -245,6 +341,7 @@ def log_predictions(
             "evaluation_version": "recorded_open_v3",
             "forecast": {"snapshot_id": board.get("snapshot_id"), "price_as_of": p.get("price_as_of") or board.get("data_as_of"),
                          "model_version": board.get("parameter_version", "legacy_ranking"), "features": p,
+                         "validation_contract": _validation_snapshot(board, p, horizon),
                          "probability_target": "legacy_close_to_open_own_baseline"},
             **_playbook_prediction_fields(p),
         })
@@ -398,43 +495,61 @@ def backfill_predictions(
 
 
 def priority_monitor(limit: int = 100, offset: int = 0, days: int = 30) -> Dict[str, Any]:
-    """Latest full candidate slice plus multi-day lifecycle counters."""
-    latest = priority_candidate_slices_for_date(limit=max(1, int(limit)), offset=max(0, int(offset)))
-    recent = priority_candidate_recent(days=days)
+    """Read persisted lifecycle data, including candidates absent from the latest slice."""
+    from market_calendar import is_trading_day, previous_trading_day
+
+    limit, offset, days = max(1, min(500, int(limit))), max(0, int(offset)), max(1, min(120, int(days)))
+    latest_date = priority_candidate_latest_date()
+    recent = priority_candidate_recent(days=days, as_of_date=latest_date) if latest_date else []
     by_symbol: Dict[str, List[Dict[str, Any]]] = {}
     for row in recent:
         by_symbol.setdefault(str(row.get("symbol") or "").upper(), []).append(row)
 
     rows = []
-    for row in latest:
-        sym = str(row.get("symbol") or "").upper()
-        hist = sorted(by_symbol.get(sym, []), key=lambda x: str(x.get("as_of_date") or ""))
+    for sym, history in by_symbol.items():
+        hist = sorted(history, key=lambda x: str(x.get("as_of_date") or ""))
+        row = hist[-1]
+        in_latest = row.get("as_of_date") == latest_date
         ranks = [int(h.get("candidate_rank") or 999999) for h in hist]
         first_seen = hist[0].get("as_of_date") if hist else row.get("as_of_date")
         prev = hist[-2] if len(hist) >= 2 else None
         rank = int(row.get("candidate_rank") or 999999)
         prev_rank = int(prev.get("candidate_rank") or rank) if prev else None
-        rank_delta = (prev_rank - rank) if prev_rank is not None else None
+        rank_delta = (prev_rank - rank) if prev_rank is not None and in_latest else None
         payload = _repair_text(row.get("payload") or {})
-        price = _finite(row.get("current_price"), _finite(payload.get("current_price")))
+        price = _finite(row.get("current_price"), _finite(payload.get("current_price"), None))
         invalidation = _finite(payload.get("invalidation_price"), 0.0)
         status = "NEW" if len(hist) <= 1 else "WATCHING"
         if rank_delta is not None and rank_delta >= 5:
             status = "IMPROVING"
         elif rank_delta is not None and rank_delta <= -5:
             status = "WEAKENING"
-        if invalidation > 0 and price > 0 and price <= invalidation:
+        if invalidation > 0 and price is not None and price > 0 and price <= invalidation:
             status = "INVALIDATED"
+        if not in_latest:
+            status = "OFF_LIST"
+        seen_dates = {h.get("as_of_date") for h in hist if h.get("as_of_date")}
+        consecutive = 0
+        try:
+            session = date.fromisoformat(latest_date)
+            while is_trading_day(session) and session.isoformat() in seen_dates:
+                consecutive += 1
+                session = previous_trading_day(session)
+        except (ValueError, TypeError):
+            consecutive = None
         rows.append({
             "symbol": sym,
             "as_of_date": row.get("as_of_date"),
             "candidate_rank": rank,
             "is_board_pick": bool(row.get("is_board_pick")),
             "status": status,
+            "in_latest_slice": in_latest,
+            "consecutive_days": consecutive,
             "first_seen": first_seen,
             "days_seen": len({h.get("as_of_date") for h in hist if h.get("as_of_date")}),
             "best_rank": min(ranks) if ranks else rank,
             "rank_delta": rank_delta,
+            "rank_comparison_date": prev.get("as_of_date") if prev and in_latest else None,
             "current_price": price,
             "calibrated_probability": row.get("calibrated_prob"),
             "priority_score": row.get("priority_score"),
@@ -450,18 +565,23 @@ def priority_monitor(limit: int = 100, offset: int = 0, days: int = 30) -> Dict[
             "hv": payload.get("hv"),
             "detail_url": payload.get("detail_url"),
         })
-    latest_date = latest[0].get("as_of_date") if latest else None
+    rows.sort(key=lambda r: (not r["in_latest_slice"], r["candidate_rank"], r["symbol"]))
+    page = rows[offset:offset + limit]
     return {
-        "available": bool(latest),
+        "available": bool(rows),
         "as_of_date": latest_date,
         "limit": int(limit),
         "offset": int(offset),
         "lookback_days": int(days),
-        "rows": rows,
+        "rows": page,
+        "total_count": len(rows),
+        "has_more": offset + len(page) < len(rows),
         "summary": {
-            "shown": len(rows),
+            "shown": len(page),
             "tracked_symbols": len(by_symbol),
-            "board_picks_shown": sum(1 for r in rows if r.get("is_board_pick")),
+            "latest_candidates": sum(1 for r in rows if r["in_latest_slice"]),
+            "off_list": sum(1 for r in rows if not r["in_latest_slice"]),
+            "board_picks_shown": sum(1 for r in page if r.get("is_board_pick")),
             "improving": sum(1 for r in rows if r.get("status") == "IMPROVING"),
             "watching": sum(1 for r in rows if r.get("status") == "WATCHING"),
             "new": sum(1 for r in rows if r.get("status") == "NEW"),
@@ -795,11 +915,16 @@ def prediction_scorecard(force: bool = False, board_only: bool = False,
         })
         if evaluation_version == "recorded_open_v3":
             result.update(predicted_win_rate=None, brier=None, brier_skill_score=None, reliability_buckets=[])
+            for bucket in result["rank_buckets"] + result["enhancement_buckets"]:
+                bucket["predicted_win_rate"] = None
 
     # Provisional mark-to-market on open board picks (monitoring only).
     try:
         from market_data_service import get_daily_history
         open_rows = predictions_open(board_only=board_only, mode=mode, evaluation_version=evaluation_version)
+        result["version_cohorts"] = _version_cohorts(
+            [{**r, "resolved": True} for r in resolved] + [{**r, "resolved": False} for r in open_rows])
+        result["version_note"] = "以下总量是描述性汇总；验证请按冻结版本与持有窗口分别查看。缺失版本保留待审计，不反推补填。"
         mtm_vals = []
         for r in open_rows[:80]:
             try:
@@ -818,6 +943,8 @@ def prediction_scorecard(force: bool = False, board_only: bool = False,
         }
     except Exception:
         result["open_positions"] = {"count": 0, "avg_return_so_far": None}
+        if "version_cohorts" not in result:
+            result["version_error"] = "版本归档读取失败，暂不报告版本分组；请稍后重试。"
 
     cache_set(cache_key, result, ttl_seconds=3600)
     return result

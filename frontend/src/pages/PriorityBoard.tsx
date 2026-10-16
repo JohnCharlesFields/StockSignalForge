@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Activity, AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, Crown, Droplets, History, Loader2, RefreshCw, ShieldQuestion, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -6,6 +6,7 @@ import { api, type ConfidenceBadge, type LeaderCompareData, type PredictionScore
 import { authHeaders } from "@/lib/apiAuth";
 import { LongOptionBoard } from "./LongOptionBoard";
 import { VSwingPanel } from "@/components/VSwingPanel";
+import { WorkbenchDisclosure } from "@/components/layout/Workbench";
 
 function fmtAdvShort(v?: number | null): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "--";
@@ -217,6 +218,7 @@ function Badge({ badge }: { badge: ConfidenceBadge }) {
 type LeaderState = "loading" | LeaderCompareData | { error: string };
 
 const MONITOR_STATUS: Record<string, { label: string; cls: string }> = {
+  OFF_LIST: { label: "暂离候选 / 待复核", cls: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
   NEW: { label: "新出现", cls: "bg-sky-500/15 text-sky-700 dark:text-sky-300" },
   WATCHING: { label: "持续观察", cls: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
   IMPROVING: { label: "排名改善", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" },
@@ -235,6 +237,10 @@ export function PriorityBoard() {
   const [monitor, setMonitor] = useState<PriorityMonitorResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [monitorLoading, setMonitorLoading] = useState(true);
+  const [monitorError, setMonitorError] = useState<string | null>(null);
+  const monitorVersion = useRef(0);
+  const monitorAbort = useRef<AbortController | null>(null);
+  const monitorMounted = useRef(false);
   const [view, setView] = useState<"today" | "monitor" | "scorecard" | "basket">("today");
   const [liquidOnly, setLiquidOnly] = useState<boolean>(() => {
     const v = typeof localStorage !== "undefined" ? localStorage.getItem("priorityBoard.liquidOnly") : null;
@@ -265,6 +271,28 @@ export function PriorityBoard() {
     }
   };
 
+  const loadMonitor = (offset = 0) => {
+    if (!monitorMounted.current) return;
+    const version = ++monitorVersion.current;
+    monitorAbort.current?.abort();
+    const controller = new AbortController();
+    monitorAbort.current = controller;
+    setMonitorLoading(true);
+    api.getPriorityMonitor(100, offset, 30, controller.signal)
+      .then(next => {
+        if (!monitorMounted.current || version !== monitorVersion.current) return;
+        setMonitor(next);
+        setMonitorError(null);
+      })
+      .catch(err => {
+        if (!monitorMounted.current || controller.signal.aborted || version !== monitorVersion.current) return;
+        setMonitorError(err instanceof Error ? err.message : "持续监测读取失败");
+      })
+      .finally(() => {
+        if (monitorMounted.current && version === monitorVersion.current) setMonitorLoading(false);
+      });
+  };
+
   const load = (force = false, liquid = liquidOnly, oversold = oversoldOnly) => {
     setLoading(true);
     api
@@ -272,12 +300,7 @@ export function PriorityBoard() {
       .then(setBoard)
       .catch((err) => toast.error(err instanceof Error ? err.message : "无法加载优先级看板"))
       .finally(() => setLoading(false));
-    setMonitorLoading(true);
-    api
-      .getPriorityMonitor(120, 0, 30)
-      .then(setMonitor)
-      .catch(() => setMonitor(null))
-      .finally(() => setMonitorLoading(false));
+    loadMonitor();
   };
 
   const toggleLiquidOnly = () => {
@@ -318,12 +341,18 @@ export function PriorityBoard() {
   };
 
   useEffect(() => {
+    monitorMounted.current = true;
     load();
+    return () => {
+      monitorMounted.current = false;
+      monitorVersion.current += 1;
+      monitorAbort.current?.abort();
+    };
   }, []);
 
   return (
     <div className="h-full overflow-y-auto bg-background">
-      <main className="mx-auto max-w-6xl px-6 py-6 space-y-5">
+      <main className="workbench-content space-y-5">
         {mode === "stocks" && liveBanner && (
           <section className="flex items-start gap-2.5 rounded-lg border-2 border-amber-500/50 bg-amber-500/10 p-3 text-sm">
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
@@ -340,20 +369,20 @@ export function PriorityBoard() {
             </button>
           </section>
         )}
-        <section className="flex flex-col gap-3 border-b pb-4 sm:flex-row sm:items-end sm:justify-between">
+        <section className="workbench-header">
           <div>
             <div className="mb-1 inline-flex items-center gap-2 text-xs font-medium text-amber-600 dark:text-amber-400">
               <Crown className="h-3.5 w-3.5" aria-hidden="true" />
               回调买入榜
             </div>
-            <h1 className="text-2xl font-semibold tracking-tight">{mode === "stocks" ? "优先级看板" : "单腿期权"}</h1>
+            <h1 className="text-2xl font-semibold">{mode === "stocks" ? "回调买入榜" : "单腿期权"}</h1>
             {mode === "stocks" && <>
             <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
               以回调信号的历史收益校准概率排列研究优先级，结合波段新买点分组；相对强度与组合择时保留为辅助证据。
             </p>
-            <p className="mt-2 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+            <details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">排名口径</summary><p className="mt-2 max-w-2xl leading-relaxed">
               当前排名逻辑：最新完整交易日的新实验买点优先；同组按收益校准概率降序，同概率再看优先级。波段买点匹配强度单独展示，不替代盈利或超额概率；过期行情不标记为当日买点。
-            </p>
+            </p></details>
             </>}
           </div>
           <div className="flex flex-wrap items-center gap-2 self-start">
@@ -416,8 +445,6 @@ export function PriorityBoard() {
         {mode === "options" && <LongOptionBoard stockBoard={board} />}
 
         {mode === "stocks" && <>
-        <VSwingPanel onComplete={() => load()} />
-
         {board && (
           <section className="flex flex-wrap items-center gap-3 rounded-lg border bg-card p-3 text-sm">
             <Badge badge={board.confidence.badge} />
@@ -456,50 +483,55 @@ export function PriorityBoard() {
         <section className="rounded-lg border bg-card p-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <div className="text-sm font-medium">回调买入生命周期监测</div>
+              <div className="text-sm font-medium">候选与持续监测</div>
               <div className="mt-1 text-xs text-muted-foreground">
                 每日把所有跑取候选入库，TopN 只是榜单标记；连续出现、排名改善和失效会在这里追踪。
               </div>
             </div>
-            <div className="inline-flex rounded-md border p-1 text-sm">
+            <div className="workbench-tabs">
               <button
                 type="button"
                 onClick={() => setView("today")}
-                className={cn("rounded px-3 py-1.5", view === "today" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                aria-pressed={view === "today"}
+                className="hover:bg-muted"
               >
                 最新候选
               </button>
               <button
                 type="button"
                 onClick={() => setView("monitor")}
-                className={cn("rounded px-3 py-1.5", view === "monitor" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                aria-pressed={view === "monitor"}
+                className="hover:bg-muted"
               >
                 持续监测
               </button>
               <button
                 type="button"
                 onClick={() => setView("scorecard")}
-                className={cn("rounded px-3 py-1.5", view === "scorecard" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                aria-pressed={view === "scorecard"}
+                className="hover:bg-muted"
               >
                 兑现对账
               </button>
               <button
                 type="button"
                 onClick={() => setView("basket")}
-                className={cn("rounded px-3 py-1.5", view === "basket" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                aria-pressed={view === "basket"}
+                className="hover:bg-muted"
               >
                 今日篮子
               </button>
             </div>
           </div>
-          <div className="mt-3 grid gap-2 text-xs sm:grid-cols-5">
+          {view === "monitor" && <div className="workbench-metrics mt-3 grid gap-2 text-xs sm:grid-cols-5">
             <div className="rounded border bg-muted/30 p-2">
               <div className="text-muted-foreground">监测日期</div>
               <div className="font-mono">{monitor?.as_of_date || "--"}</div>
             </div>
             <div className="rounded border bg-muted/30 p-2">
-              <div className="text-muted-foreground">已入库标的</div>
+              <div className="text-muted-foreground">窗口内入库标的</div>
               <div className="font-mono">{monitor?.summary.tracked_symbols ?? "--"}</div>
+              <div className="text-muted-foreground">最新 {monitor?.summary.latest_candidates ?? "--"} · 暂离 {monitor?.summary.off_list ?? "--"}</div>
             </div>
             <div className="rounded border bg-muted/30 p-2">
               <div className="text-muted-foreground">排名改善</div>
@@ -510,10 +542,10 @@ export function PriorityBoard() {
               <div className="font-mono">{monitor?.summary.watching ?? "--"}</div>
             </div>
             <div className="rounded border bg-muted/30 p-2">
-              <div className="text-muted-foreground">今日展示</div>
+              <div className="text-muted-foreground">当前页展示</div>
               <div className="font-mono">{view === "monitor" ? monitor?.rows.length ?? 0 : board?.picks.length ?? 0}</div>
             </div>
-          </div>
+          </div>}
         </section>
 
         {board?.no_edge_today && (
@@ -563,6 +595,17 @@ export function PriorityBoard() {
 
         {view === "monitor" && (
           <section className="rounded-lg border bg-card">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3 text-xs">
+              <div className="text-muted-foreground">监测 {monitor?.lookback_days ?? 30} 天 · 共 {monitor?.total_count ?? "--"} 只 · 第 {Math.floor((monitor?.offset ?? 0) / (monitor?.limit || 100)) + 1} 页</div>
+              <div className="flex items-center gap-2">
+                <button type="button" aria-label="监测上一页" disabled={monitorLoading || !monitor?.offset} onClick={() => loadMonitor(Math.max(0, (monitor?.offset ?? 0) - (monitor?.limit || 100)))} className="inline-flex items-center gap-1 rounded border px-2 py-1 disabled:opacity-40"><ChevronRight className="h-4 w-4 rotate-180" />上一页</button>
+                <button type="button" aria-label="监测下一页" disabled={monitorLoading || !monitor?.has_more} onClick={() => loadMonitor((monitor?.offset ?? 0) + (monitor?.limit || 100))} className="inline-flex items-center gap-1 rounded border px-2 py-1 disabled:opacity-40">下一页<ChevronRight className="h-4 w-4" /></button>
+              </div>
+            </div>
+            {monitorError && <div role="alert" className="flex flex-wrap items-center gap-2 border-b px-4 py-3 text-xs text-amber-700 dark:text-amber-300">
+              <span>监测读取失败：{monitorError}。{monitor ? "下表保留上次成功读取，不是最新刷新结果。" : "暂不能判断是否有切片。"}</span>
+              <button type="button" disabled={monitorLoading} onClick={() => loadMonitor(monitor?.offset ?? 0)} className="inline-flex items-center gap-1 rounded border px-2 py-1"><RefreshCw className="h-3 w-3" />重试监测</button>
+            </div>}
             <div className="overflow-x-auto">
               <table className="w-full min-w-[900px] text-sm">
                 <thead className="bg-muted/40 text-xs text-muted-foreground">
@@ -570,7 +613,7 @@ export function PriorityBoard() {
                     <th className="px-4 py-3 text-left font-medium">排名</th>
                     <th className="px-4 py-3 text-left font-medium">标的</th>
                     <th className="px-4 py-3 text-left font-medium">监测状态</th>
-                    <th className="px-4 py-3 text-right font-medium">连续观察</th>
+                    <th className="px-4 py-3 text-right font-medium">累计 / 连续出现</th>
                     <th className="px-4 py-3 text-right font-medium">排名变化</th>
                     <th className="px-4 py-3 text-right font-medium">校准胜率</th>
                     <th className="px-4 py-3 text-right font-medium">优先级</th>
@@ -586,7 +629,7 @@ export function PriorityBoard() {
                       </td>
                     </tr>
                   )}
-                  {!monitorLoading && (!monitor || monitor.rows.length === 0) && (
+                  {!monitorLoading && !monitorError && (!monitor || monitor.rows.length === 0) && (
                     <tr>
                       <td colSpan={9} className="px-4 py-12 text-center text-muted-foreground">
                         暂无每日切片。点击刷新或等待每日扫描后，会把所有跑取候选写入数据库。
@@ -611,9 +654,9 @@ export function PriorityBoard() {
                         )}
                         <SourceUniverseBadges ids={r.source_universe_ids} labels={r.source_universe_labels} />
                       </td>
-                      <td className="px-4 py-3"><MonitorStatusBadge status={r.status} /></td>
-                      <td className="px-4 py-3 text-right font-mono">{r.days_seen ?? "--"}天</td>
-                      <td className={cn("px-4 py-3 text-right font-mono", (r.rank_delta ?? 0) > 0 ? "text-emerald-600 dark:text-emerald-400" : (r.rank_delta ?? 0) < 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>
+                      <td className="px-4 py-3"><MonitorStatusBadge status={r.status} />{r.in_latest_slice === false && <div className="mt-1 text-[10px] text-muted-foreground">最后出现 {r.as_of_date} · 旧参考价</div>}</td>
+                      <td className="px-4 py-3 text-right font-mono">{r.days_seen ?? "--"} / {r.consecutive_days ?? "--"}天</td>
+                      <td title={r.rank_comparison_date ? `对比上次出现：${r.rank_comparison_date}` : undefined} className={cn("px-4 py-3 text-right font-mono", (r.rank_delta ?? 0) > 0 ? "text-emerald-600 dark:text-emerald-400" : (r.rank_delta ?? 0) < 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>
                         {r.rank_delta == null ? "--" : r.rank_delta > 0 ? `+${r.rank_delta}` : String(r.rank_delta)}
                       </td>
                       <td className="px-4 py-3 text-right font-mono">{pct(r.calibrated_probability)}</td>
@@ -757,6 +800,9 @@ export function PriorityBoard() {
         <p className="text-xs text-muted-foreground">
           {board?.method_note}
         </p>
+        <WorkbenchDisclosure title="波段实验与验证">
+          <VSwingPanel onComplete={() => load()} />
+        </WorkbenchDisclosure>
         </>}
       </main>
     </div>
@@ -963,26 +1009,44 @@ function BasketView() {
 
 function ScorecardView() {
   const [mode, setMode] = useState<"live" | "backfill">("live");
-  const [evaluationVersion, setEvaluationVersion] = useState("legacy");
+  const [evaluationVersion, setEvaluationVersion] = useState("recorded_open_v3");
   const [parameterStatus, setParameterStatus] = useState<Awaited<ReturnType<typeof api.getPullbackParameterStatus>> | null>(null);
   const [sc, setSc] = useState<PredictionScorecard | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  const fetchSc = (m: "live" | "backfill") => {
+  const scorecardSequence = useRef(0);
+  const scorecardMounted = useRef(true);
+  const selection = useRef({ mode, evaluationVersion });
+  selection.current = { mode, evaluationVersion };
+  const [scorecardError, setScorecardError] = useState("");
+  const fetchSc = () => {
+    const { mode: m, evaluationVersion: version } = selection.current;
+    const sequence = ++scorecardSequence.current;
     setLoading(true);
-    api.getPredictionScorecard(m, evaluationVersion).then(setSc).catch(() => setSc(null)).finally(() => setLoading(false));
-    api.getPullbackParameterStatus().then(setParameterStatus).catch(() => setParameterStatus(null));
+    setSc(null);
+    setScorecardError("");
+    const active = () => scorecardMounted.current && sequence === scorecardSequence.current;
+    api.getPredictionScorecard(m, version).then(value => { if (active()) setSc(value); })
+      .catch(error => { if (active()) setScorecardError(error instanceof Error ? error.message : "对账读取失败"); })
+      .finally(() => { if (active()) setLoading(false); });
+    api.getPullbackParameterStatus().then(value => { if (active()) setParameterStatus(value); })
+      .catch(() => { if (active()) setParameterStatus(null); });
   };
   useEffect(() => {
-    fetchSc(mode);
+    scorecardMounted.current = true;
+    return () => { scorecardMounted.current = false; ++scorecardSequence.current; };
+  }, []);
+  useEffect(() => {
+    fetchSc();
+    return () => { ++scorecardSequence.current; };
   }, [mode, evaluationVersion]);
 
   const runResolve = async () => {
     setBusy(true);
     try {
       await api.resolvePredictionsNow();
-      fetchSc(mode);
+      if (scorecardMounted.current) fetchSc();
       toast.success("已结算到期预测并刷新对账");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "结算失败");
@@ -995,7 +1059,7 @@ function ScorecardView() {
     try {
       await api.logPredictionsNow();
       toast.success("已记录今日全量候选预测");
-      fetchSc(mode);
+      if (scorecardMounted.current) fetchSc();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "记录失败");
     } finally {
@@ -1011,9 +1075,11 @@ function ScorecardView() {
       // Poll the background job until done (or give up after ~5 min).
       for (let i = 0; i < 30; i++) {
         await new Promise((res) => setTimeout(res, 10_000));
+        if (!scorecardMounted.current) return;
         const st = await api.getBackfillStatus().catch(() => null);
+        if (!scorecardMounted.current) return;
         if (st?.status === "done") {
-          fetchSc("backfill");
+          fetchSc();
           toast.success(`历史回放完成（样本内，已结算 ${st.n_resolved ?? 0} 笔）`);
           break;
         }
@@ -1034,6 +1100,7 @@ function ScorecardView() {
   const negativeEvidence = ci?.[1] != null && ci[1] < 0;
   return (
     <section className="space-y-4">
+      {scorecardError && <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">{scorecardError}</p>}
       <div className="flex flex-wrap items-center gap-3 text-sm">
         <label htmlFor="prediction-evaluation">结算口径</label>
         <select id="prediction-evaluation" value={evaluationVersion} onChange={e => setEvaluationVersion(e.target.value)} className="rounded border bg-background px-2 py-1">
@@ -1044,6 +1111,35 @@ function ScorecardView() {
         <button type="button" className="text-xs text-primary underline" onClick={async () => {const result = await api.trainPullbackParameters().catch(() => null); toast.info(result?.status === "running" ? "参数验证已启动" : "参数任务暂未启动，稍后刷新状态");}}>运行参数验证</button>
       </div>
       {sc?.evaluation_note && <p className="text-xs text-muted-foreground">{sc.evaluation_note}</p>}
+      {sc?.version_error && <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">{sc.version_error}</p>}
+      {!!sc?.version_cohorts?.length && (
+        <div className="min-w-0 space-y-3 border-y py-4">
+          <h2 className="text-sm font-semibold">按冻结版本与持有窗口对账</h2>
+          <p className="text-xs text-muted-foreground">{sc.version_note}</p>
+          <table className="w-full table-fixed text-sm" aria-label="冻结版本前向对账">
+            <thead><tr className="border-b text-left text-xs text-muted-foreground">
+              <th className="w-[26%] py-2">版本 / 曲线</th><th>窗口</th><th>记录 / 已结 / 待结</th>
+              <th>实际超额命中</th><th>平均净收益</th><th>自身净超额 / 区间</th>
+            </tr></thead>
+            <tbody>{sc.version_cohorts.map(cohort => (
+              <tr key={cohort.cohort_id} className="border-b align-top last:border-0">
+                <td className="break-all py-2 pr-3 text-xs">
+                  <div className="font-medium">{cohort.ranking_version || cohort.recorded_model_version || "版本未归档"}</div>
+                  <div className="mt-1 text-muted-foreground">{cohort.metadata_complete ? "版本信息已归档 · 非有效性认证" : "版本信息不完整 · 待审计"}</div>
+                  <div className="mt-1 text-muted-foreground">{cohort.calibration_ids.join(" / ") || "无已归档曲线身份"}</div>
+                  <div className="mt-1 text-muted-foreground"><span className="whitespace-nowrap">{cohort.first_signal_date}</span> 至 <span className="whitespace-nowrap">{cohort.last_signal_date}</span></div>
+                </td>
+                <td className="py-2">{cohort.horizon_days}交易日</td>
+                <td className="py-2 tabular-nums">{cohort.total} / {cohort.resolved} / {cohort.pending}<div className="mt-1 text-xs text-muted-foreground">{cohort.resolved_dates}个已结信号日</div></td>
+                <td className="py-2 tabular-nums">{pct(cohort.realized_win_rate, 1)}</td>
+                <td className="py-2 tabular-nums">{signedPct(cohort.mean_net_return, 2)}</td>
+                <td className="py-2 tabular-nums">{signedPct(cohort.mean_net_excess, 2)}<div className="mt-1 text-xs text-muted-foreground">{cohort.overlap_adjusted_ci[0] == null ? "日期不足，暂无区间" : `[${signedPct(cohort.overlap_adjusted_ci[0], 2)}, ${signedPct(cohort.overlap_adjusted_ci[1], 2)}]`}</div></td>
+              </tr>
+            ))}</tbody>
+          </table>
+          <p className="text-xs text-muted-foreground">旧收盘口径概率不用于记录后开盘口径校准。版本完整不等于策略有效；净收益是研究事件均值，不是账户收益。</p>
+        </div>
+      )}
       <div className="flex flex-col gap-3 rounded-lg border bg-card p-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <div className="mb-1 inline-flex items-center gap-2 text-xs font-medium text-primary">
@@ -1129,12 +1225,12 @@ function ScorecardView() {
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <ScCard title="预测 vs 实盘胜率">
+            <ScCard title={evaluationVersion === "recorded_open_v3" ? "实际超额命中率" : "预测 vs 实盘胜率"}>
               <div className="flex items-baseline gap-2">
                 <span className="text-2xl font-semibold tabular-nums">{pct(sc.realized_win_rate, 1)}</span>
-                <span className="text-xs text-muted-foreground">实盘 · 预测 {pct(sc.predicted_win_rate, 1)}</span>
+                <span className="text-xs text-muted-foreground">{evaluationVersion === "recorded_open_v3" ? "记录后开盘 · 旧概率不可比" : `实盘 · 预测 ${pct(sc.predicted_win_rate, 1)}`}</span>
               </div>
-              <div className="mt-1 text-[11px] text-muted-foreground">实盘≈预测=校准准；差太多=漂移</div>
+              <div className="mt-1 text-[11px] text-muted-foreground">{evaluationVersion === "recorded_open_v3" ? "扣成本后跑赢事前自身基线；不代表期权盈利概率" : "同口径下比较预测与实际；旧曲线来源仍待审计"}</div>
             </ScCard>
             <ScCard title="实盘净超额 vs 基线">
               <div className={cn("text-2xl font-semibold tabular-nums", (sc.mean_net_excess ?? 0) > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>

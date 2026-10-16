@@ -78,11 +78,13 @@ def _resolve_one(event: dict[str, Any], history_period: str) -> dict[str, Any] |
     frame, _source = get_daily_history(symbol, period=history_period)
     if frame.empty or "Close" not in frame:
         return None
-    close = pd.to_numeric(frame["Close"], errors="coerce").dropna()
+    close = pd.to_numeric(frame["Close"], errors="coerce").dropna().sort_index()
     if len(close) <= horizon:
         return None
     open_ = exit_model.aligned_open(frame, close)
     as_of_ts = pd.Timestamp(as_of)
+    if as_of_ts not in close.index:
+        return None
     # Entry = first bar on or after the as-of date.
     entry_positions = [pos for pos, ts in enumerate(close.index) if ts >= as_of_ts]
     if not entry_positions:
@@ -93,8 +95,13 @@ def _resolve_one(event: dict[str, Any], history_period: str) -> dict[str, Any] |
     forward_return = exit_model.forward_return(close, open_, entry_idx, horizon)
     if forward_return is None:
         return None
-    baseline_samples = _baseline_forward_returns(close, horizon, open_)
-    baseline = sum(baseline_samples) / len(baseline_samples) if baseline_samples else 0.0
+    known = close.loc[:as_of_ts]
+    if known.empty:
+        return None
+    known_open = open_.reindex(known.index) if open_ is not None else None
+    baseline = float(exit_model.known_baseline_series(known, known_open, horizon).iloc[-1])
+    if not np.isfinite(baseline):
+        return None
     return {
         "forward_return": forward_return,
         "baseline_return": baseline,

@@ -74,9 +74,9 @@ def _baseline_returns(frame: pd.DataFrame, horizon: int) -> list[float]:
 
 def _derive_for_horizon(payload: dict[str, Any], horizon: int, histories: dict[str, pd.DataFrame]) -> dict[str, Any]:
     rt_cost = cost_model.equity_round_trip_cost()
-    baseline_cache: dict[str, float] = {}
+    baseline_cache: dict[tuple[str, str, int, str], float] = {}
     out_events = []
-    skipped = {"missing_history": 0, "missing_date": 0, "insufficient_forward": 0}
+    skipped = {"missing_history": 0, "missing_date": 0, "insufficient_forward": 0, "unknown_baseline": 0}
     for row in payload.get("events") or []:
         sym = str(row.get("ticker") or row.get("symbol") or "").upper()
         bench_sym = str(row.get("benchmark") or "SPY").upper()
@@ -107,14 +107,22 @@ def _derive_for_horizon(payload: dict[str, Any], horizon: int, histories: dict[s
             continue
         forward = exitp / entry - 1.0
         bench_ret = b_exit / b_entry - 1.0
-        if sym not in baseline_cache:
-            vals = _baseline_returns(stock, horizon)
-            baseline_cache[sym] = mean(vals) if vals else 0.0
-        own_base = baseline_cache[sym]
+        key = (sym, str(day.date()), horizon, bench_sym)
+        if key not in baseline_cache:
+            vals = _baseline_returns(stock.loc[:day], horizon)
+            if not vals:
+                skipped["unknown_baseline"] += 1
+                continue
+            baseline_cache[key] = mean(vals)
+        own_base = baseline_cache[key]
         beta = _num(row.get("beta"), 1.0) or 1.0
         out = dict(row)
         out.update({
             "horizon_days": horizon,
+            "baseline_method": "known_matured_expanding_v1",
+            "baseline_as_of": str(day.date()),
+            "exit_date": str(stock.index[idx + horizon].date()),
+            "label_available_at": str(stock.index[idx + horizon].date()),
             "forward_return": round(forward, 8),
             "benchmark_return": round(bench_ret, 8),
             "symbol_baseline_return": round(own_base, 8),

@@ -368,22 +368,21 @@ class SignalEngine:
 
         for code, df in data_map.items():
             signal = pd.Series(0, index=df.index, dtype=int)
-
-            swings = self._find_swings(df["high"], df["low"])
-            if len(swings) < 4:
-                result[code] = signal
-                continue
-
-            # 5 浪推动结构
-            if len(swings) >= 6:
-                for idx, direction in self._find_impulse(swings):
-                    if idx in signal.index:
-                        signal[idx] = direction
-
-            # ABC 调整结构
-            for idx, direction in self._find_abc(swings):
-                if idx in signal.index:
-                    signal[idx] = direction
+            seen = set()
+            # Zigzag may replace a previous extreme when another pivot arrives.
+            # Replay prefixes and freeze signals at their first observation,
+            # rather than shifting a retrospectively revised final pivot list.
+            for end in range(self.swing_window * 2 + 1, len(df) + 1):
+                prefix = df.iloc[:end]
+                swings = self._find_swings(prefix["high"], prefix["low"])
+                matches = self._find_impulse(swings) if len(swings) >= 6 else []
+                if len(swings) >= 4:
+                    matches += self._find_abc(swings)
+                for pivot, direction in matches:
+                    key = (pivot, direction)
+                    if key not in seen:
+                        signal.iloc[end - 1] = direction
+                        seen.add(key)
 
             result[code] = signal
 

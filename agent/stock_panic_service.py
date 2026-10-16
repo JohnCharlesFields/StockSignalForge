@@ -6,6 +6,7 @@ data the project already has: OHLCV, market proxy returns, GEX and event risk.
 """
 
 from __future__ import annotations
+from gex_quality import normalize_gex
 
 import math
 from typing import Any
@@ -177,7 +178,7 @@ def stock_panic_proxy(
     beta = _beta(returns, _market_returns())
     beta_for_calc = max(0.0, min(2.5, beta if beta is not None else 1.0))
     macro_value = float(macro_regime.get("value") or 20.0)
-    gex = opportunity.get("gamma_exposure") or {}
+    gex = normalize_gex(opportunity.get("gamma_exposure"))
     gex_risk = str(gex.get("risk_level") or "").lower()
     gex_regime = str(gex.get("regime") or "").lower()
     gex_penalty = 0.0

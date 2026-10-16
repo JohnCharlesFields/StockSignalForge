@@ -5,6 +5,7 @@ proxies.  It is a research context input, not a trading signal by itself.
 """
 
 from __future__ import annotations
+from gex_quality import normalize_gex
 
 import json
 import math
@@ -285,7 +286,7 @@ def panic_evidence_for_opportunity(opportunity: dict[str, Any] | None, regime: d
     opportunity_score = float(opportunity.get("opportunity_score") or 0.0)
     risk_level = str(opportunity.get("risk_level") or "")
     liquidity_score = float(opportunity.get("liquidity_score") or 0.0)
-    gex = opportunity.get("gamma_exposure") or {}
+    gex = normalize_gex(opportunity.get("gamma_exposure"))
     probability = 0.50
     label = "宏观环境中性"
     reason = f"{regime.get('display_name')} {value:.2f}，{regime.get('label_cn')}。"

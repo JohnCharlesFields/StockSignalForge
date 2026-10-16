@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+## [2026-10-16] Causal Validation and Versioned Forward Evidence
+
+### Added
+- Offline, cache-only calibration revalidation with frozen experiment inputs, three chronological validation folds, mature-label purging, a terminal historical test, date-block intervals and explicit activation gates. Input manifests record hashes; a viewed historical period cannot be relabeled as an untouched holdout.
+- Immutable forward-ledger version snapshots: actual ranking configuration, formula identity, calibration identity/fallback, horizon and probability/outcome definitions. Grouped evidence includes pending records and separates versions, horizons and live/replay modes. Missing old metadata remains unknown.
+- A responsive version table in the board's reconciliation view. New-open evaluation no longer displays the old close-entry probability in rank/tag sub-tables or computes mismatched Brier scores. No database migration or automatic model activation.
+
+### Fixed
+- Daily-history quality filtering no longer uses a future neighbor to remove past observations.
+- Replay and related calibration baselines use outcomes already mature at the signal date; future labels cannot redefine an earlier event's historical benchmark.
+- Portfolio optimization uses returns strictly before the decision timestamp; open-time equity/order decisions do not inspect the same day's close or reopen after an intraday exit.
+- Peer-earnings history truncates market data at `as_of` and rejects explicitly future-available evidence. Missing historical publication metadata is not certified.
+- Legacy Elliott/harmonic templates emit on first confirmation rather than backpainting the pivot date. Soft-feature training separates whole dates and purges labels crossing the test boundary.
+- New calibration builds save inactive research candidates, not automatic replacements justified by in-sample top-bucket intervals.
+- GEX empty/non-finite OI chains are not counted as verified coverage; all-zero curves do not manufacture a Gamma Flip. Valid zero-net exposure is retained.
+
+### Evidence and Limitations
+- The completed historical revalidation did **not** support promoting the new candidates: probability quality did not beat the training base rate, rank monotonicity failed and Top20 return intervals crossed zero. No claim of improved win rate or elimination of all overfitting.
+- Historical membership, corporate-action adjustment, retired symbols and truly untouched future dates remain limitations. Event-basket returns are not a funded account curve, and equity probabilities are not option profit probabilities.
+- Public-copy test/build results are recorded in `PUBLIC_RELEASE.md`; older CI failures remain visible. Credentials, provider datasets, event files, private annotations and personal handoffs are excluded. Existing opt-in public defaults remain unchanged.
+
 ## [2026-10-10] Experimental Swing Research and Reliability Fixes
 
 Incremental public source sync of completed October 9–10 work. No production

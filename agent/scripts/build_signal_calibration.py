@@ -123,6 +123,14 @@ def _build_for_signal(
         if event.get(score_field) is not None
     ]
     curve = build_calibration(events, signal_type=signal_type, horizon=horizon, cost_bps=cost_bps)
+    curve["global"]["provenance"] = {
+        "baseline_method": "known_matured_expanding_v1" if raw_events and all(
+            e.get("baseline_method") == "known_matured_expanding_v1" for e in raw_events
+        ) else "unverified_legacy",
+        "in_sample": True, "unseen_holdout": False,
+        "point_in_time_universe": None, "survivorship_controlled": None,
+        "source_version": "causal_replay_candidate_v1",
+    }
     if data_quality is not None:
         curve["global"]["data_quality"] = data_quality
     calibration_id = signal_calibration_upsert(
@@ -134,9 +142,10 @@ def _build_for_signal(
         event_count=curve["global"]["events"],
         cluster_count=curve["global"]["clusters"],
         cost_bps=cost_bps,
-        make_active=True,
+        # An in-sample edge is not permission to replace the production curve.
+        make_active=False,
     )
-    return {"calibration_id": calibration_id, "curve": curve}
+    return {"calibration_id": calibration_id, "curve": curve, "activated": False}
 
 
 def _fmt_pct(value: Any) -> str:
@@ -155,6 +164,7 @@ def _reliability_lines(signal_type: str, horizon: int, curve: dict[str, Any]) ->
         f"- **Edge 判定**: {verdict} · 区分度 {edge.get('spread', 0):.0%} · "
         f"顶桶 n={top.get('n')} 超额 {(top.get('mean_excess_net') or 0):.2%} CI[{_fmt_pct(ci[0])}, {_fmt_pct(ci[1])}]"
     )
+    edge_line += " · 样本内研究结果，仅保存候选，未通过独立时间验证，不自动启用"
     lines = [
         f"### {signal_type} / {horizon}d  (events={curve['global']['events']}, clusters={curve['global']['clusters']})",
         "",

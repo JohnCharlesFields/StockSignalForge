@@ -233,12 +233,12 @@ def main():
             continue
         close = pd.to_numeric(frame["Close"], errors="coerce").reset_index(drop=True)
         open_ = pd.to_numeric(frame["Open"], errors="coerce").reset_index(drop=True)
-        baseline = exit_model.baseline_forward_returns(close, open_, H)
-        base_mean = mean(baseline) if baseline else 0.0
+        baselines = exit_model.known_baseline_series(close, open_, H)
 
         def net_at(i):
             r = exit_model.forward_return(close, open_, i, H)
-            return None if r is None else (r - base_mean - rt)
+            base_mean = float(baselines.iloc[i])
+            return None if r is None or not np.isfinite(base_mean) else (r - base_mean - rt)
 
         try:
             St, trig = _detector(frame, walk_forward=not args.full_fit)

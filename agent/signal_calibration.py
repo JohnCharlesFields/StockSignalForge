@@ -25,9 +25,12 @@ turn labels into mojibake.
 from __future__ import annotations
 
 import math
+import hashlib
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 CURVE_VERSION = "calib_v1"
+_FORMULA_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 # Minimum samples in the bucket that contains the queried score before we
 # trust the empirical number instead of falling back to the legacy sigmoid.
@@ -341,6 +344,17 @@ def calibrate(
     except Exception:
         curve_row = None
 
+    # Identity travels with the probability actually computed, not a later
+    # registry lookup when the board is logged or its outcome is resolved.
+    base["calibration_reference"] = {
+        "signal_type": signal_type, "horizon_days": int(horizon),
+        "method_version": CURVE_VERSION,
+        "formula_sha256": _FORMULA_SHA256,
+        "calibration_id": curve_row.get("calibration_id") if curve_row else None,
+        "generated_at": curve_row.get("generated_at") if curve_row else None,
+        "curve_source": curve_row.get("source") if curve_row else None,
+        "source": "fallback_sigmoid", "applied": False,
+    }
     if curve_row and isinstance(curve_row.get("curve"), dict):
         applied = apply_calibration(curve_row["curve"], normalized, min_support=min_support)
         if applied.get("support_ok") and applied.get("p_calibrated") is not None:
@@ -351,6 +365,7 @@ def calibrate(
                 "generated_at": curve_row.get("generated_at"),
                 "event_count": curve_row.get("event_count"),
             })
+            base["calibration_reference"].update(source="calibrated", applied=True)
             return base
         # Curve exists but the queried region is under-sampled: surface the
         # empirical numbers as context but still mark it a fallback.

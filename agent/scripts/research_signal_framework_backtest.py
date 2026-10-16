@@ -61,13 +61,10 @@ def _collect_symbol_events(
     keeps backtest/calibration behaviour identical (resolved events only)."""
     if frame.empty or "Close" not in frame or len(frame) < 45:
         return []
-    clean = frame.dropna(subset=["Close"]).copy()
+    clean = frame.dropna(subset=["Close"]).sort_index().copy()
     close = clean["Close"].astype(float)
     open_ = exit_model.aligned_open(clean, close)  # entry close[T] -> exit open[T+H]
-    baseline = _baseline_forward_returns(close, horizon, open_)
-    if not baseline:
-        return []
-    symbol_baseline = mean(baseline)
+    baselines = exit_model.known_baseline_series(close, open_, horizon)
     ret_5 = close.pct_change(5)
     ret_20 = close.pct_change(20)
     volume = pd.to_numeric(clean.get("Volume", pd.Series(0.0, index=clean.index)), errors="coerce").fillna(0.0)
@@ -136,6 +133,10 @@ def _collect_symbol_events(
             forward_return = _forward_return(close, index, horizon, open_)
             if forward_return is None and not include_unresolved:
                 continue
+            baseline_value = float(baselines.iloc[index])
+            symbol_baseline = baseline_value if math.isfinite(baseline_value) else None
+            if symbol_baseline is None and not include_unresolved:
+                continue
             hv_rise_val = hv_rise.iloc[index]
             events.append({
                 "ticker": ticker,
@@ -147,7 +148,12 @@ def _collect_symbol_events(
                 "pullback_hv_score": round(float(pullback_hv_score.iloc[index]), 4) if math.isfinite(float(pullback_hv_score.iloc[index])) else None,
                 "forward_return": forward_return,
                 "symbol_baseline_return": symbol_baseline,
-                "excess_return": (forward_return - symbol_baseline) if forward_return is not None else None,
+                "baseline_method": "known_matured_expanding_v1",
+                "baseline_as_of": clean.index[index].strftime("%Y-%m-%d"),
+                "exit_date": clean.index[index + horizon].strftime("%Y-%m-%d") if forward_return is not None else None,
+                "label_available_at": clean.index[index + horizon].strftime("%Y-%m-%d") if forward_return is not None else None,
+                "horizon_days": horizon,
+                "excess_return": (forward_return - symbol_baseline) if forward_return is not None and symbol_baseline is not None else None,
                 "resolved": forward_return is not None,
             })
             next_allowed = index + max(1, cooldown_days)

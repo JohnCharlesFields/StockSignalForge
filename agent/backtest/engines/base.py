@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 import re as _re
 import sys
 from abc import ABC, abstractmethod
@@ -446,22 +447,28 @@ class BaseEngine(ABC):
         codes: List[str],
     ) -> None:
         """Bar-by-bar execution with market rule enforcement."""
+        opening_prices = close_df.shift(1).copy()
+        for c in codes:
+            if "open" in data_map[c]:
+                prices = pd.to_numeric(data_map[c]["open"], errors="coerce").reindex(dates)
+                valid = prices.map(lambda value: math.isfinite(value) and value > 0)
+                opening_prices[c] = prices.where(valid, opening_prices[c])
         for i, ts in enumerate(dates):
             self._bar_idx = i
 
-            # a. Per-bar hooks (funding fees, liquidation checks)
-            for c in codes:
-                if ts in data_map[c].index:
-                    self.on_bar(c, data_map[c].loc[ts], ts)
-
-            # b. Rebalance each symbol to target weight
-            equity = self._calc_equity(close_df, ts)
+            # Open first, then process intrabar/close hooks; never reopen at the
+            # earlier open after a liquidation discovered later in this bar.
+            equity = self._calc_equity(opening_prices, ts)
             for c in codes:
                 try:
                     target_w = float(target_pos.at[ts, c]) if ts in target_pos.index else 0.0
                     self._rebalance(c, target_w, data_map.get(c), ts, equity)
                 except Exception as exc:
                     logger.warning("Rebalance failed for %s at %s: %s", c, ts, exc)
+
+            for c in codes:
+                if ts in data_map[c].index:
+                    self.on_bar(c, data_map[c].loc[ts], ts)
 
             # c. Record equity snapshot
             snap_equity = self._calc_equity(close_df, ts)
@@ -513,7 +520,18 @@ class BaseEngine(ABC):
         if df is None or ts not in df.index:
             return
 
-        bar = df.loc[ts]
+        bar = df.loc[ts].copy()
+        open_price = float(bar.get("open", float("nan")))
+        if not math.isfinite(open_price) or open_price <= 0:
+            return  # A missing open is not permission to execute at a future close.
+        previous = df.loc[df.index < ts, "close"] if "close" in df else pd.Series(dtype=float)
+        pre_close = float(previous.iloc[-1]) if len(previous) else float(bar.get("pre_close", float("nan")))
+        # Execution guards must see open-time data, not today's high/low/close.
+        for field in ("close", "high", "low"):
+            bar[field] = open_price
+        bar["volume"] = 0.0
+        bar["pre_close"] = pre_close
+        bar["pct_chg"] = (open_price / pre_close - 1) * 100 if math.isfinite(pre_close) and pre_close > 0 else float("nan")
 
         # Close if target is flat or direction changed
         if current_pos is not None:

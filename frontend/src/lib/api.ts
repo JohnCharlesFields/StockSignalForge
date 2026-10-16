@@ -239,8 +239,8 @@ export const api = {
   reviewLongOption: (symbol: string) => request<LongOptionReview>(`/priority-board/long-options/${encodeURIComponent(symbol)}/review`, { method: "POST" }),
   getPriorityBasket: (budget = 10000, n = 8, weighting: "inverse_vol" | "equal" = "inverse_vol") =>
     request<PriorityBasketResponse>(`/priority-board/basket?budget=${budget}&n=${n}&weighting=${weighting}`),
-  getPriorityMonitor: (limit = 100, offset = 0, days = 30) =>
-    request<PriorityMonitorResponse>(`/priority-board/monitor?limit=${limit}&offset=${offset}&days=${days}`),
+  getPriorityMonitor: (limit = 100, offset = 0, days = 30, signal?: AbortSignal) =>
+    request<PriorityMonitorResponse>(`/priority-board/monitor?limit=${limit}&offset=${offset}&days=${days}`, { signal }),
   getTrackLeader: (symbol: string) =>
     request<TrackLeaderResponse>(`/track-leader/${encodeURIComponent(symbol)}`),
 
@@ -1712,6 +1712,9 @@ export interface PriorityMonitorRow {
   status: PriorityMonitorStatus;
   first_seen?: string | null;
   days_seen?: number;
+  consecutive_days?: number | null;
+  in_latest_slice?: boolean;
+  rank_comparison_date?: string | null;
   best_rank?: number | null;
   rank_delta?: number | null;
   current_price?: number | null;
@@ -1737,9 +1740,13 @@ export interface PriorityMonitorResponse {
   offset: number;
   lookback_days: number;
   rows: PriorityMonitorRow[];
+  total_count?: number;
+  has_more?: boolean;
   summary: {
     shown: number;
     tracked_symbols: number;
+    latest_candidates?: number;
+    off_list?: number;
     board_picks_shown: number;
     improving: number;
     watching: number;
@@ -1948,16 +1955,39 @@ export interface PredictionScorecard {
   evaluation_note?: string;
   overlap_adjusted_ci?: [number | null, number | null];
   mean_net_return?: number | null;
+  version_note?: string;
+  version_error?: string;
+  version_cohorts?: {
+    cohort_id: string;
+    ranking_version: string | null;
+    recorded_model_version?: string | null;
+    calibration_ids: string[];
+    metadata_complete: boolean;
+    horizon_days: number;
+    total: number;
+    resolved: number;
+    pending: number;
+    first_signal_date: string;
+    last_signal_date: string;
+    resolved_dates: number;
+    realized_win_rate: number | null;
+    mean_net_return: number | null;
+    mean_net_excess: number | null;
+    overlap_adjusted_ci: [number | null, number | null];
+    predicted_win_rate: number | null;
+    brier: number | null;
+    probability_note?: string;
+  }[];
   horizon_cohorts?: {horizon_days: number; n: number; mean_net_excess: number}[];
   brier?: number | null;
   brier_skill_score?: number | null;
   reliability_buckets?: { label: string; n: number; predicted: number; realized: number }[];
-  rank_buckets?: { label: string; n: number; predicted_win_rate: number; realized_win_rate: number; mean_net_excess: number }[];
+  rank_buckets?: { label: string; n: number; predicted_win_rate: number | null; realized_win_rate: number; mean_net_excess: number }[];
   rank_monotone?: boolean | null;
   enhancement_buckets?: {
     label: string;
     n: number;
-    predicted_win_rate: number;
+    predicted_win_rate: number | null;
     realized_win_rate: number;
     mean_net_excess: number;
     net_excess_ci?: [number | null, number | null];

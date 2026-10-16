@@ -59,7 +59,8 @@ class BaseOptimizer(ABC):
             if not active or i < self.lookback:
                 continue
 
-            window = ret.loc[:dt, active].tail(self.lookback)
+            # Weights execute at dt's open; its close return is not yet known.
+            window = ret.loc[ret.index < dt, active].tail(self.lookback)
             if len(window) < max(self.lookback // 2, 5):
                 continue
 

@@ -57,6 +57,7 @@ from research_signal_sorting import (
     win_rate_sort_metrics as _shared_win_rate_sort_metrics,
 )
 from signal_dashboard_page import signal_dashboard_html
+from gex_quality import normalize_gex, snapshot_gex_view
 from macro_panic_service import get_vix_regime, panic_evidence_for_opportunity
 from portfolio_timing_service import portfolio_timing_gate
 from stock_panic_service import stock_panic_evidence, stock_panic_proxy
@@ -99,7 +100,7 @@ from app_database import (
     cache_set,
     database_status,
     ensure_database,
-    latest_home_dashboard_snapshot,
+    latest_home_dashboard_snapshot as _stored_home_dashboard_snapshot,
     portfolio_account_get,
     portfolio_account_set,
     portfolio_holding_delete,
@@ -117,6 +118,10 @@ from app_database import (
     user_watchlist_set_enabled,
     user_watchlist_upsert,
 )
+
+def latest_home_dashboard_snapshot():
+    return snapshot_gex_view(_stored_home_dashboard_snapshot())
+
 
 # UTF-8 on Windows
 import sys as _sys
@@ -4707,7 +4712,7 @@ def _research_evidence_summary(
             "reliability": round(sample_reliability, 3),
             "weight": 0.18,
         })
-    gamma_exposure = (opportunity or {}).get("gamma_exposure") or {}
+    gamma_exposure = normalize_gex((opportunity or {}).get("gamma_exposure"))
     if gamma_exposure.get("available"):
         gamma_regime = str(gamma_exposure.get("regime") or "")
         gamma_risk = str(gamma_exposure.get("risk_level") or "")
@@ -4895,7 +4900,7 @@ def _compact_research_context(row: Dict[str, Any]) -> Dict[str, Any]:
     hypothesis = row.get("hypothesis_test") or {}
     macro_regime = row.get("macro_regime") or {}
     stock_panic = row.get("stock_panic") or {}
-    gex = opportunity.get("gamma_exposure") or {}
+    gex = normalize_gex(opportunity.get("gamma_exposure"))
     tunnel = (timing.get("daily_tunnel") or {})
     pullback_rejection = opportunity.get("pullback_rejection") or {}
     pullback_confirmation = opportunity.get("pullback_confirmation") or {}
@@ -4956,7 +4961,7 @@ def _compact_research_context(row: Dict[str, Any]) -> Dict[str, Any]:
         "stock_panic_beta": stock_panic.get("beta_spy_qqq"),
         "stock_panic_drawdown_60d": stock_panic.get("drawdown_60d"),
         "stock_panic_volume_spike": stock_panic.get("volume_spike"),
-        "gamma_exposure": gex if gex.get("available") else {},
+        "gamma_exposure": gex,
         "gex_level": gex.get("risk_level") if gex.get("available") else None,
         "gex_regime": gex.get("regime") if gex.get("available") else None,
         "unified_score": evidence.get("score"),
@@ -5146,7 +5151,7 @@ def _universe_recent_win_metrics(
     unified = mean(unified_values) if unified_values else None
     risk_reward = mean(rr_values) if rr_values else None
     execution = mean(execution_values) if execution_values else None
-    gex_available = sum(1 for item in ranked_results if ((item.get("gamma_exposure") or {}).get("available")))
+    gex_available = sum(1 for item in ranked_results if normalize_gex(item.get("gamma_exposure")).get("available"))
     gex_coverage = gex_available / len(ranked_results) if ranked_results else 0.0
     if has_win_data:
         empirical_component = historical if historical is not None else 0.5

@@ -67,7 +67,7 @@ def _collect_symbol_events(symbol: str, horizons: list[int]) -> dict[int, list[d
     frame = _massive_aggs(symbol, pd.Timestamp.utcnow().to_pydatetime().replace(year=pd.Timestamp.utcnow().year - 3))
     if frame is None or frame.empty or "Close" not in frame:
         return events
-    close = pd.to_numeric(frame["Close"], errors="coerce").dropna()
+    close = pd.to_numeric(frame["Close"], errors="coerce").dropna().sort_index()
     if len(close) < max(horizons) + 5:
         return events
     # Year-over-year EPS growth: quarter i vs quarter i+4 (4 quarters earlier).
@@ -83,8 +83,10 @@ def _collect_symbol_events(symbol: str, horizons: list[int]) -> dict[int, list[d
         except (TypeError, ValueError):
             continue
         for h in horizons:
-            baseline_samples = _baseline_forward_returns(close, h)
-            baseline = sum(baseline_samples) / len(baseline_samples) if baseline_samples else 0.0
+            baseline_samples = _baseline_forward_returns(close.loc[:as_of], h)
+            if not baseline_samples:
+                continue
+            baseline = sum(baseline_samples) / len(baseline_samples)
             entry_pos = [p for p, ts in enumerate(close.index) if ts > as_of]
             if not entry_pos:
                 continue
@@ -99,6 +101,9 @@ def _collect_symbol_events(symbol: str, horizons: list[int]) -> dict[int, list[d
             events[h].append({
                 "ticker": symbol, "score": _score(growth), "growth": growth,
                 "forward_return": fwd, "excess_return": fwd - baseline,
+                "baseline_as_of": str(as_of.date()), "date": str(as_of.date()),
+                "baseline_method": "known_matured_expanding_v1",
+                "exit_date": str(close.index[xi].date()), "label_available_at": str(close.index[xi].date()),
             })
     return events
 

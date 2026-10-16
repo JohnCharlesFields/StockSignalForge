@@ -21,9 +21,13 @@ Chinese like the rest of the services.
 """
 
 from __future__ import annotations
+from gex_quality import normalize_gex, snapshot_gex_view
 
 import math
 import os
+import hashlib
+import json
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -33,7 +37,7 @@ import pandas as pd
 from app_database import (
     cache_get,
     cache_set,
-    latest_home_dashboard_snapshot,
+    latest_home_dashboard_snapshot as _stored_home_dashboard_snapshot,
     priority_candidate_recent,
     priority_candidate_slices_for_date,
     signal_calibration_active,
@@ -59,6 +63,10 @@ CACHE_TTL_SECONDS = 26 * 3600
 # sits inside the user's T+7~T+9 hold window. See exit_model.py + MAINTENANCE_LOG.
 CALIBRATION_HORIZON = 8
 PULLBACK_HV_HORIZON = 8
+
+
+def latest_home_dashboard_snapshot():
+    return snapshot_gex_view(_stored_home_dashboard_snapshot())
 
 SECTOR_ETFS = {
     "technology": "XLK",
@@ -169,7 +177,8 @@ def _board_from_latest_slices(limit: int = 8) -> Optional[Dict[str, Any]]:
             "raw_launch_score": _finite(payload.get("raw_launch_score")),
             "daily_tunnel_score": _finite(payload.get("daily_tunnel_score")),
             "trend_30d": _finite(payload.get("trend_30d")),
-            "options_sentiment": payload.get("options_sentiment") or {"tone": "unknown", "label": "--"},
+            "options_sentiment": _options_sentiment(payload),
+            "gamma_exposure": normalize_gex(payload.get("gamma_exposure")),
             "iv": payload.get("iv") or {},
             "hv": payload.get("hv") or {},
             "liquidity": payload.get("liquidity") or {},
@@ -894,7 +903,8 @@ def _pullback_hv_score(launch: float, hv_rise: Optional[float]) -> float:
 
 def _options_sentiment(row: Dict[str, Any]) -> Dict[str, str]:
     """Collapse options/gamma data into a directional sentiment for equity reads."""
-    regime = str(row.get("gex_regime") or "").lower()
+    gex = normalize_gex(row.get("gamma_exposure"))
+    regime = str(gex.get("regime") or "").lower() if gex.get("available") else ""
     if regime.startswith("positive"):
         return {"tone": "bullish", "label": "期权情绪：看涨（正 Gamma 压制波动）"}
     if regime.startswith("negative"):
@@ -1113,7 +1123,8 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
             freshness = _board_freshness(cached.get("data_as_of") or cache_get("market_calendar:last_synced_session"))
             from v_swing_service import attach_board
             view = attach_board({**cached, **freshness, "cache_hit": True})
-            return {**view, "picks": (view.get("picks") or [])[:limit]}
+            picks = [{**p, "options_sentiment": _options_sentiment(p)} for p in (view.get("picks") or [])[:limit]]
+            return {**view, "picks": picks}
         if os.getenv("PRIORITY_BOARD_RECOMPUTE_ON_MISS", "0").lower() in {"0", "false", "no"}:
             slice_board = _board_from_latest_slices(MAX_CACHED_PICKS)
             if slice_board is not None:
@@ -1126,6 +1137,10 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
     spy_ret = _spy_return(20)
     selected = _select_signals()
     badge = {"badge": selected["badge"], "note": selected["note"], "edge": selected.get("edge")}
+    ranking_config = dict(ranking_settings())
+    formula_hash = hashlib.sha256()
+    for name in ("priority_board_service.py", "launch_signal_service.py"):
+        formula_hash.update((Path(__file__).parent / name).read_bytes())
 
     # Compute fresh launch/tunnel scores for the candidate pool so the validated
     # calibrated term actually applies to every name (snapshot scores are sparse).
@@ -1172,6 +1187,7 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
             calibration_source = cal.get("source")
             expected_return = cal.get("expected_return")
             expected_excess = cal.get("expected_excess")
+            calibration_references = [cal["calibration_reference"]] if cal.get("calibration_reference") else []
         else:
             cal_launch = calibrate(selected["launch"], launch, horizon)
             cal_tunnel = calibrate(selected["daily_tunnel"], tunnel, horizon)
@@ -1186,6 +1202,8 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
             calibration_source = cal_launch.get("source")
             expected_return = cal_launch.get("expected_return") if cal_launch.get("expected_return") is not None else cal_tunnel.get("expected_return")
             expected_excess = cal_launch.get("expected_excess") if cal_launch.get("expected_excess") is not None else cal_tunnel.get("expected_excess")
+            calibration_references = [c["calibration_reference"] for raw, c in ((launch, cal_launch), (tunnel, cal_tunnel))
+                                      if raw > 0 and c.get("p_calibrated") is not None and c.get("calibration_reference")]
 
         rel_strength = (stock_ret - spy_ret) if stock_ret is not None else 0.0
         rs_norm = max(0.0, min(1.0, 0.5 + rel_strength * 2.0))
@@ -1226,6 +1244,7 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
             "expected_return_8d": round(expected_return, 6) if expected_return is not None else None,
             "expected_excess_8d": round(expected_excess, 6) if expected_excess is not None else None,
             "calibration_source": calibration_source,
+            "calibration_references": calibration_references,
             "regime_multiplier": round(regime, 4),
             "portfolio_regime": row.get("portfolio_regime"),
             "portfolio_regime_cn": row.get("portfolio_regime_cn"),
@@ -1233,6 +1252,7 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
             "daily_tunnel_score": round(tunnel, 1),
             "trend_30d": _finite(row.get("trend_30d")),
             "options_sentiment": _options_sentiment(row),
+            "gamma_exposure": normalize_gex(row.get("gamma_exposure")),
             "iv": iv_features(symbol),
             "hv": _hv_state(sc.get("hv_rise") if sc else None),
             "liquidity": _liquidity_tier(sc.get("adv") if sc else None),
@@ -1286,7 +1306,8 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
     )
     from pullback_parameter_service import ACTIVE_KEY, predict_pick
     active_parameters = cache_get(ACTIVE_KEY)
-    if isinstance(active_parameters, dict) and active_parameters.get("eligible_for_activation") and not active_parameters.get("rejection_reasons"):
+    parameters_used = isinstance(active_parameters, dict) and active_parameters.get("eligible_for_activation") and not active_parameters.get("rejection_reasons")
+    if parameters_used:
         for p in picks:
             p["parameter_research"] = predict_pick(p, active_parameters)
         picks.sort(key=lambda p: (bool((p.get("parameter_research") or {}).get("entry_candidate")),
@@ -1308,8 +1329,18 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
         if not (p.get("earnings") or {}).get("available"):
             p["earnings"] = _earnings_brief(p["symbol"])
     top_win = picks[0]["calibrated_probability"] if picks else 0.0
+    if ranking_settings()["version"] != ranking_config["version"]:
+        raise ValueError("Ranking configuration changed during board generation; prior snapshot retained")
     result = {
-        "parameter_version": (active_parameters or {}).get("parameter_version", ranking_settings()["version"]),
+        "parameter_version": active_parameters.get("parameter_version") if parameters_used else ranking_config["version"],
+        "ranking_reference": {
+            "formula_version": formula_hash.hexdigest(),
+            "configuration": {k: ranking_config[k] for k in (
+                "version", "oversold_weight", "volatility_weight", "rs_full_threshold", "rs_weak_threshold",
+                "rs_weak_multiplier", "relative_strength_nudge", "market_tag_nudge", "sector_tag_nudge")},
+            "rs_gate_enabled": _RS_GATE,
+            "active_parameters": json.loads(json.dumps(active_parameters.get("parameters"))) if parameters_used else None,
+        },
         "generated_at": datetime.now(timezone.utc).isoformat(),
         **_board_freshness((snapshot.get("payload") or {}).get("data_as_of") or cache_get("market_calendar:last_synced_session")),
         "snapshot_id": snapshot.get("snapshot_id"),

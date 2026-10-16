@@ -974,6 +974,18 @@ def _build_signals(
     target_symbols: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
+    # Every downstream tape, similarity and tunnel must use the same cutoff.
+    histories = {
+        symbol: frame.loc[pd.to_datetime(frame.index).date <= now].sort_index().copy()
+        for symbol, frame in histories.items()
+    }
+    earnings = {
+        symbol: record for symbol, record in earnings.items()
+        if not record.get("available_at") or (
+            _iso_day(record.get("available_at")) is not None
+            and _iso_day(record.get("available_at")) <= now
+        )
+    }
     target_symbols = {str(symbol).upper() for symbol in (target_symbols or set())}
     for group in groups:
         leaders: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -996,6 +1008,8 @@ def _build_signals(
                 continue
             for symbol in group["symbols"]:
                 if symbol == leader["symbol"]:
+                    continue
+                if symbol not in earnings:
                     continue
                 if target_symbols and symbol not in target_symbols:
                     continue
