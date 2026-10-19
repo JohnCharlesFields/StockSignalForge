@@ -145,9 +145,19 @@ class TestSlippage:
         hk_slipped = hk_engine.apply_slippage(100.0, 1) - 100.0
         assert us_slipped < hk_slipped
 
-    def test_us_slippage_rate(self) -> None:
+    def test_us_slippage_rate(self, monkeypatch) -> None:
+        monkeypatch.setenv("COST_EQUITY_COMMISSION_BPS", "0")
+        monkeypatch.setenv("COST_EQUITY_HALF_SPREAD_BPS", "1.5")
+        monkeypatch.setenv("COST_EQUITY_SLIPPAGE_BPS", "1.5")
         engine = _us_engine()
-        assert engine.apply_slippage(100.0, 1) == pytest.approx(100.05)
+        assert engine.apply_slippage(100.0, 1) == pytest.approx(100.03)
+
+    def test_us_slippage_inherits_shared_cost_override(self, monkeypatch) -> None:
+        monkeypatch.setenv("COST_EQUITY_COMMISSION_BPS", "0")
+        monkeypatch.setenv("COST_EQUITY_HALF_SPREAD_BPS", "5")
+        monkeypatch.setenv("COST_EQUITY_SLIPPAGE_BPS", "5")
+        engine = _us_engine()
+        assert engine.apply_slippage(100.0, 1) == pytest.approx(100.1)
 
     def test_hk_slippage_rate(self) -> None:
         engine = _hk_engine()

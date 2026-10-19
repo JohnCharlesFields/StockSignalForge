@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from io import BytesIO
 import os
 import re
 import threading
@@ -159,6 +161,18 @@ def _read_daily_cache(symbol: str) -> pd.DataFrame:
         return _normalize_daily(pd.read_csv(path, index_col="Date", parse_dates=["Date"]))
     except (OSError, ValueError, KeyError):
         return pd.DataFrame()
+
+
+def read_daily_cache_snapshot(symbol: str) -> tuple[pd.DataFrame, dict]:
+    """Exact cached bytes and provenance, without normalization or any fetch."""
+    sym = str(symbol).strip().upper()
+    if not re.fullmatch(r'[A-Z0-9][A-Z0-9.\^-]{0,15}', sym):
+        raise ValueError('invalid_cached_equity_symbol')
+    path = _CACHE_ROOT / 'ohlcv_daily' / f'{_safe_symbol(sym)}.csv'
+    raw = path.read_bytes()
+    frame = pd.read_csv(BytesIO(raw), index_col='Date', parse_dates=['Date'])
+    return frame, dict(source='cache:ohlcv_daily', content_sha256=hashlib.sha256(raw).hexdigest(),
+                       provider=None, adjustment='unverified', bytes=len(raw))
 
 
 def _write_daily_cache(symbol: str, frame: pd.DataFrame) -> None:

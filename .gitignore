@@ -139,6 +139,7 @@ wiki/*_AUDIT_*.md
 !wiki/CALL_PLAN_RESEARCH_ZH.md
 !wiki/RELEASE_20261010_ZH.md
 !wiki/RELEASE_20261016_ZH.md
+!wiki/RELEASE_20261019_ZH.md
 
 # Private manual training labels; only the empty template is distributed.
 agent/config/v_swing_annotations.json

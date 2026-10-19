@@ -355,6 +355,20 @@ def log_predictions(
         signal_type="pullback_hv",
         board_top_n=top_n,
     )
+    # The immutable portfolio roster links these durable predictions. Its
+    # failure must not revoke a successfully completed daily ledger.
+    portfolio_capture = {"status": "top_n_only_not_captured", "recorded": False}
+    if log_all_candidates:
+        try:
+            from portfolio_forward_service import capture_board, capture_signal_evidence
+            portfolio_capture = capture_board(board, as_of)
+            if portfolio_capture.get('batch_id') and portfolio_capture.get('status') in {'recorded', 'already_recorded'}:
+                try:
+                    portfolio_capture['signal_evidence'] = capture_signal_evidence(portfolio_capture['batch_id'])
+                except Exception as exc:
+                    portfolio_capture['signal_evidence'] = dict(status='capture_failed', error_type=type(exc).__name__)
+        except Exception as exc:
+            portfolio_capture = {"status": "capture_failed", "recorded": False, "error_type": type(exc).__name__}
     _bust_scorecard_cache()
     return {
         "as_of_date": as_of,
@@ -366,6 +380,7 @@ def log_predictions(
         "horizon_days": horizon,
         "scope": "all_candidates" if log_all_candidates else "board_top_n",
         "source": board.get("source") or "priority_board",
+        "portfolio_forward": portfolio_capture,
     }
 
 

@@ -894,11 +894,10 @@ def _pullback_hv_score(launch: float, hv_rise: Optional[float]) -> float:
     Mirrors the replay-side ``pullback_hv_score`` so calibrate() reads the same
     axis.  Missing HV reads neutral (0.5) so the pullback part still counts.
     """
-    launch_norm = min(1.0, max(0.0, _finite(launch)))
-    hv_norm = 0.5 if hv_rise is None else min(1.0, max(0.0, 0.5 + 0.5 * _finite(hv_rise)))
+    from pullback_entry_research import pullback_score
     config = ranking_settings()
     a, b = config["oversold_weight"], config["volatility_weight"]
-    return min(1.0, max(0.0, (a * (1.0 - launch_norm) + b * hv_norm) / (a + b)))
+    return pullback_score(_finite(launch), hv_rise, (a, b))
 
 
 def _options_sentiment(row: Dict[str, Any]) -> Dict[str, str]:
@@ -1082,6 +1081,7 @@ def _score_candidates(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
             stock_ret_63 = _series_window_return(close, 63)
             stock_ret_126 = _series_window_return(close, 126)
             hv_rise = _hv_rise(close)
+            from pullback_entry_research import current_context
             out[symbol] = {
                 "launch": _finite(scored.get("launch_score")),
                 "tunnel": _finite((scored.get("daily_tunnel") or {}).get("score")),
@@ -1094,6 +1094,7 @@ def _score_candidates(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
                 "pullback_hv_score": _pullback_hv_score(_finite(scored.get("launch_score")), hv_rise),
                 "adv": _adv(frame),
                 "deep_oversold": _deep_oversold(close),
+                "entry_research": current_context(frame, scored),
             }
         except Exception:
             continue
@@ -1139,7 +1140,7 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
     badge = {"badge": selected["badge"], "note": selected["note"], "edge": selected.get("edge")}
     ranking_config = dict(ranking_settings())
     formula_hash = hashlib.sha256()
-    for name in ("priority_board_service.py", "launch_signal_service.py"):
+    for name in ("priority_board_service.py", "launch_signal_service.py", "pullback_entry_research.py"):
         formula_hash.update((Path(__file__).parent / name).read_bytes())
 
     # Compute fresh launch/tunnel scores for the candidate pool so the validated
@@ -1261,6 +1262,7 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
             "source_universe_labels": list(row.get("source_universe_labels") or []),
             "confidence_badge": badge["badge"],
             "reason": _reason(rel_strength, calibrated_prob, regime, row),
+            "entry_research": sc.get("entry_research") if sc else None,
             "detail_url": f"/single-stock-overnight?symbol={symbol}",
             "earnings": row.get("earnings") or {},
         })

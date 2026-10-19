@@ -714,6 +714,11 @@ export interface TradeMarker {
   reason?: string;
   text?: string;
   live?: boolean;
+  research_only?: boolean;
+  direction?: "LONG" | "SHORT";
+  action?: "OPEN_SHORT" | "COVER_SHORT" | "OBSERVE";
+  stage?: "WATCH" | "CONFIRMED" | "ENTRY" | "EXIT" | "INVALIDATED";
+  strategy?: string;
 }
 
 export interface EquityPoint {
@@ -2181,4 +2186,18 @@ export interface MessageItem {
   created_at: string;
   linked_attempt_id?: string;
   metadata?: Record<string, unknown>;
+}
+
+
+export interface EntryResearchContext {
+  status?: string;
+  version?: string;
+  stage?: string;
+  strategy?: string;
+  trend_up?: boolean;
+  trend_down?: boolean;
+  reason?: string;
+  note?: string;
+  latest?: { stage?: string; strategy?: string; reason?: string; trend_up?: boolean; trend_down?: boolean; entry_price?: number | null; stop_price?: number | null; target_price?: number | null };
+  contract?: { version?: string; hold_sessions?: number; calibrated?: boolean; direction?: "SHORT"; borrow_verified?: boolean };
 }

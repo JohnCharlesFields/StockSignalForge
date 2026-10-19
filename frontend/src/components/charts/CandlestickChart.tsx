@@ -114,6 +114,8 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
   const chartRef = useRef<ReturnType<typeof echarts.init> | null>(null);
   const [subs, setSubs] = useState<Set<Sub>>(new Set(["vol"]));
   const [range, setRange] = useState<Range>(initialRange ?? "ALL");
+  const [rangeRevision, setRangeRevision] = useState(0);
+  const viewportRef = useRef<{ start: number; end: number; first: string; last: string } | null>(null);
   const toggleSub = useCallback((id: Sub) => {
     setSubs((prev) => {
       const next = new Set(prev);
@@ -232,14 +234,12 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
       legendNames.push("BOLL");
     }
 
-    // Trade markers. Live (unresolved) pullback_hv setups -- today / last ~10
-    // sessions whose forward return isn't measurable yet -- are drawn amber with
-    // a "B?" so they read as "current setup", distinct from backtested green Bs.
+    // Research states are never coloured as validated profitable buys.
     const marks = (markers || []).map(m => ({
       coord: [m.time, m.price],
-      value: m.code?.startsWith("v-swing") ? (m.side === "BUY" ? "买" : "卖") : m.live ? "B?" : (m.side === "BUY" ? "B" : "S"),
-      name: [`${m.code?.startsWith("v-swing") ? `${m.text} · ${m.code.endsWith("replay") ? "时序回放" : "前向研究"}` : m.live ? "今日/近期设置(未到期)" : m.side} @ ${m.price}`, m.qty ? `Qty: ${m.qty}` : "", m.reason || ""].filter(Boolean).join("\n"),
-      itemStyle: { color: m.live ? t.warningColor : (m.side === "BUY" ? t.upColor : t.downColor) },
+      value: m.research_only ? m.text || "观" : m.code?.startsWith("v-swing") ? (m.side === "BUY" ? "买" : "卖") : m.live ? "B?" : (m.side === "BUY" ? "B" : "S"),
+      name: [`${m.research_only ? `${m.text}${m.direction === "SHORT" ? " · 空头假设" : ""} · 规则研究，非真实成交` : m.code?.startsWith("v-swing") ? `${m.text} · ${m.code.endsWith("replay") ? "时序回放" : "前向研究"}` : m.live ? "今日/近期设置(未到期)" : m.side} @ ${m.price}`, m.qty ? `Qty: ${m.qty}` : "", m.reason || ""].filter(Boolean).join("\n"),
+      itemStyle: { color: m.research_only ? m.stage === "WATCH" ? t.warningColor : m.stage === "EXIT" || (m.direction === "SHORT" && m.stage === "INVALIDATED") ? t.textColor : m.direction === "SHORT" || m.stage === "INVALIDATED" ? t.downColor : t.infoColor : m.live ? t.warningColor : (m.side === "BUY" ? t.upColor : t.downColor) },
       label: { color: "#fff", fontSize: 10, fontWeight: "bold" as const },
     }));
 
@@ -325,6 +325,16 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
 
     const maxBars = RANGE_BARS[range];
     const defaultStart = maxBars >= data.length ? 0 : Math.max(0, 100 - (maxBars / data.length) * 100);
+    const saved = viewportRef.current;
+    const firstIndex = saved ? dates.indexOf(saved.first) : -1;
+    const lastIndex = saved ? dates.indexOf(saved.last) : -1;
+    // Date anchors keep a historical window fixed when new candles arrive.
+    const anchored = firstIndex >= 0 && lastIndex >= firstIndex;
+    const start = saved ? (anchored ? firstIndex / Math.max(1, dates.length - 1) * 100 : saved.start) : defaultStart;
+    const end = saved ? (anchored ? lastIndex / Math.max(1, dates.length - 1) * 100 : saved.end) : 100;
+    const zoomWindow = anchored
+      ? { startValue: firstIndex, endValue: lastIndex }
+      : { start, end };
 
     // 多空博弈区间: volume-profile value area over the CURRENTLY VISIBLE window.
     // Recomputed on range-button change AND on mouse-wheel zoom/pan (see the
@@ -360,7 +370,7 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
       },
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const zoneSeries: any[] = showZone ? [zoneSeriesOpt(computeBattleZone(visibleBars(defaultStart, 100)))] : [];
+    const zoneSeries: any[] = showZone ? [zoneSeriesOpt(computeBattleZone(visibleBars(start, end)))] : [];
 
     chart.setOption({
       backgroundColor: "transparent",
@@ -405,8 +415,8 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
       xAxis: xAxes,
       yAxis: yAxes,
       dataZoom: [
-        { type: "inside", xAxisIndex: allXIdx, start: defaultStart, end: 100 },
-        { type: "slider", xAxisIndex: allXIdx, bottom: 4, height: 20, labelFormatter: (val: string) => val },
+        { id: "time-inside", type: "inside", xAxisIndex: allXIdx, ...zoomWindow },
+        { id: "time-slider", type: "slider", xAxisIndex: allXIdx, ...zoomWindow, bottom: 4, height: 20, labelFormatter: (val: string) => val },
       ],
       series: [
         ...zoneSeries,
@@ -442,25 +452,34 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
     // mouse wheel / drag (debounced) so it auto-matches the scrolled range.
     let zoomTimer: number | null = null;
     const onZoom = () => {
+      // Save immediately, even with the battle zone off or a render before the debounce fires.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const opt = chart.getOption() as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dz = opt.dataZoom?.find((d: any) => d.id === "time-inside");
+      if (!dz || !Number.isFinite(dz.start) || !Number.isFinite(dz.end)) return;
+      const s = Math.max(0, Math.min(100, dz.start));
+      const e = Math.max(s, Math.min(100, dz.end));
+      const windowBars = visibleBars(s, e);
+      if (windowBars.length) viewportRef.current = { start: s, end: e, first: windowBars[0].time, last: windowBars[windowBars.length - 1].time };
       if (!showZone) return;
       if (zoomTimer) window.clearTimeout(zoomTimer);
       zoomTimer = window.setTimeout(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const opt = chart.getOption() as any;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const dz = Array.isArray(opt.dataZoom) ? opt.dataZoom.find((d: any) => d && typeof d.start === "number") : null;
-        const s = dz ? dz.start : defaultStart;
-        const e = dz ? dz.end : 100;
         chart.setOption({ series: [zoneSeriesOpt(computeBattleZone(visibleBars(s, e)))] });
       }, 120);
     };
-    chart.off("dataZoom");
+    const onRestore = () => {
+      viewportRef.current = null;
+      chart.dispatchAction({ type: "dataZoom", start: defaultStart, end: 100 });
+    };
     chart.on("dataZoom", onZoom);
+    chart.on("restore", onRestore);
     return () => {
       chart.off("dataZoom", onZoom);
+      chart.off("restore", onRestore);
       if (zoomTimer) window.clearTimeout(zoomTimer);
     };
-  }, [data, markers, baseData, indicatorCache, extraIndicators, subs, range, overlays, dark, currentIv, priceLines, showLines, showZone]);
+  }, [data, markers, baseData, indicatorCache, extraIndicators, subs, range, rangeRevision, overlays, dark, currentIv, priceLines, showLines, showZone]);
 
   if (data.length === 0) {
     return <div className="text-muted-foreground text-sm p-4">No price data</div>;
@@ -472,7 +491,7 @@ export function CandlestickChart({ data, markers, indicators, height = 500, init
         {/* Time range */}
         <div className="flex gap-0.5">
           {(["1M", "3M", "6M", "1Y", "ALL"] as const).map((r) => (
-            <button key={r} onClick={() => setRange(r)} className={cn("px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors", range === r ? "bg-primary/15 text-primary font-medium" : "text-muted-foreground/50 hover:text-muted-foreground")}>{r}</button>
+            <button key={r} onClick={() => { viewportRef.current = null; setRange(r); setRangeRevision(v => v + 1); }} className={cn("px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors", range === r ? "bg-primary/15 text-primary font-medium" : "text-muted-foreground/50 hover:text-muted-foreground")}>{r}</button>
           ))}
         </div>
 

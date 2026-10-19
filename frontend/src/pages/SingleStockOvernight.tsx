@@ -18,7 +18,7 @@ import { CandlestickChart } from "@/components/charts/CandlestickChart";
 import { GildataConsensusTable, GildataIndustryInfo, type GildataEvidence } from "@/components/GildataEvidence";
 import { CompanyRelations, IndustryCompanies, legacyCompanyRows, type CompanyNetwork } from "@/components/CompanyNetwork";
 import { StockNewsResearch } from "@/components/StockNewsResearch";
-import { api, type DistributionRisk, type EarningsInfo, type PriceBar, type TradeMarker, type NewsDigest } from "@/lib/api";
+import { api, type DistributionRisk, type EarningsInfo, type PriceBar, type TradeMarker, type NewsDigest, type EntryResearchContext } from "@/lib/api";
 
 type AnyRecord = Record<string, any>;
 const SupplyChainGraph = lazy(() => import("@/components/SupplyChainGraph").then(m => ({ default: m.SupplyChainGraph })));
@@ -274,12 +274,14 @@ function fmtMoney(value: unknown) {
 }
 
 function fmtPct(value: unknown, digits = 1) {
+  if (value == null || value === "") return "--";
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number)) return "--";
   return `${(number * 100).toFixed(digits)}%`;
 }
 
 function fmtSignedPct(value: unknown, digits = 1) {
+  if (value == null || value === "") return "--";
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number)) return "--";
   const pct = number * 100;
@@ -984,7 +986,7 @@ export function SingleStockOvernight() {
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs">
-                <StatusPill tone={row.open_risk_status === "BLOCK_OPEN" ? "bad" : "warn"}>{row.open_risk_status || "研究复核"}</StatusPill>
+                <StatusPill tone={row.open_risk_status === "BLOCK_OPEN" ? "bad" : "warn"}>{row.open_risk_status === "ALLOW_OPEN" ? "预算校验通过 · 非入场信号" : row.open_risk_status === "BLOCK_OPEN" ? "预算风控阻断" : row.open_risk_status || "研究复核"}</StatusPill>
                 {data?.day_change?.as_of && <span className="text-muted-foreground">截至 {data.day_change.as_of} 收盘（缓存）</span>}
                 {row.context_status === "loading" && <span className="text-muted-foreground">三层证据更新中</span>}
               </div>
@@ -1311,12 +1313,18 @@ function PriceChart({ symbol, currentIv, priceLines, dataDate }: { symbol: strin
   const [note, setNote] = useState("");
   const [swing, setSwing] = useState<import("@/lib/api").VSwingChartSnapshot | null>(null);
   const [showSwing, setShowSwing] = useState(true);
+  const [showEntry, setShowEntry] = useState(true);
+  const [showShort, setShowShort] = useState(true);
+  const [entryResearch, setEntryResearch] = useState<EntryResearchContext | null>(null);
+  const [shortResearch, setShortResearch] = useState<EntryResearchContext | null>(null);
   useEffect(() => {
     if (!symbol) return;
     let cancelled = false;
     const controller = new AbortController();
     setLoading(true);
     setSwing(null);
+    setEntryResearch(null);
+    setShortResearch(null);
     fetch(`/single-stock-overnight/${encodeURIComponent(symbol)}/candles?timeframe=${tf}`, { headers: authHeaders(), signal: controller.signal })
       .then((r) => r.json())
       .then((resp) => {
@@ -1327,10 +1335,12 @@ function PriceChart({ symbol, currentIv, priceLines, dataDate }: { symbol: strin
         }));
         setBars(conv);
         setMarkers((resp?.markers || []) as TradeMarker[]);
+        setEntryResearch(resp?.entry_research ?? null);
+        setShortResearch(resp?.short_entry_research ?? null);
         setNote(resp?.note || "");
         setSwing(tf === "daily" ? resp?.v_swing ?? null : null);
       })
-      .catch(() => { if (!cancelled) { setBars([]); setMarkers([]); setNote("行情加载失败"); } })
+      .catch(() => { if (!cancelled) { setBars([]); setMarkers([]); setEntryResearch(null); setShortResearch(null); setNote("行情加载失败"); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; controller.abort(); };
   }, [symbol, tf, dataDate]);
@@ -1369,6 +1379,24 @@ function PriceChart({ symbol, currentIv, priceLines, dataDate }: { symbol: strin
         {swing?.score?.lifecycle === "concentration_watch" && <span className="text-amber-700 dark:text-amber-300">集中度观察，未列入开放买点参考</span>}
         {swing?.score?.buy_p != null && <span>买/卖匹配强度 {(swing.score.buy_p*100).toFixed(1)}% / {((swing.score.sell_p ?? 0)*100).toFixed(1)}%</span>}
       </div>}
+      {tf === "daily" && entryResearch && <p role="status" className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+        多头：{entryResearch.latest?.trend_down ? "中期下行 · 不产生确认入场" : entryResearch.status === "unavailable" ? "研究信号待核验" : entryResearch.latest?.strategy === "countertrend" ? "逆势或中期偏弱 · 仅观察" : "顺势结构 · 仍需确认"}
+        <span className="ml-2 font-normal">{entryResearch.latest?.reason || entryResearch.reason}</span>
+      </p>}
+      {tf === "daily" && shortResearch && <div role="status" className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <span className={shortResearch.latest?.stage === "PENDING_ENTRY" || shortResearch.latest?.stage === "RESEARCH_HOLD" ? "font-medium text-rose-700 dark:text-rose-300" : "text-muted-foreground"}>
+          空头：{shortResearch.status === "unavailable" ? "数据待核验" : shortResearch.latest?.stage === "PENDING_ENTRY" ? "收盘确认 · 待次开盘" : shortResearch.latest?.stage === "RESEARCH_HOLD" ? "假设持有 · 等待回补" : shortResearch.latest?.stage === "SHORT_WATCH" || shortResearch.latest?.stage === "WAITING_CONFIRMATION" ? "反弹受阻 · 等待确认" : "等待反弹受阻"}
+        </span>
+        <span className="text-amber-700 dark:text-amber-300">实验 · 未验证正期望</span>
+        <span className="text-muted-foreground">{shortResearch.latest?.reason || shortResearch.reason}</span>
+        {shortResearch.latest?.entry_price != null && <span>假设开空 ${shortResearch.latest.entry_price.toFixed(2)}</span>}
+        {shortResearch.latest?.stop_price != null && <span className="text-rose-700 dark:text-rose-300">失效 ${shortResearch.latest.stop_price.toFixed(2)}</span>}
+        {shortResearch.latest?.target_price != null && <span>回补参考 ${shortResearch.latest.target_price.toFixed(2)}</span>}
+      </div>}
+      {tf === "daily" && (entryResearch || shortResearch) && <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2 text-xs">
+        {entryResearch && <label className="inline-flex items-center gap-2"><input type="checkbox" checked={showEntry} onChange={event => setShowEntry(event.target.checked)} />回调规则研究标记</label>}
+        {shortResearch && <label className="inline-flex items-center gap-2"><input type="checkbox" checked={showShort} onChange={event => setShowShort(event.target.checked)} />反弹做空研究标记</label>}
+      </div>}
       {tf === "daily" && showSwing && swingPlan && <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums">
         <span>参考入场 ${swingPlan.entry.toFixed(2)}</span>
         <span className="text-rose-700 dark:text-rose-300">冻结止损 ${swingPlan.stop.toFixed(2)}</span>
@@ -1383,8 +1411,13 @@ function PriceChart({ symbol, currentIv, priceLines, dataDate }: { symbol: strin
       ) : bars.length < 2 ? (
         <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">暂无{TF_LABEL[tf]}行情数据</div>
       ) : (
-        <div className="mt-2"><CandlestickChart data={bars} markers={[...markers, ...(showSwing && tf === "daily" ? swing?.markers ?? [] : [])]} height={720} initialOverlays={["ema5", "ema10", "ema15", "ema20"]} currentIv={currentIv} priceLines={[...(priceLines ?? []), ...swingLines]} initialRange={tf === "daily" ? "3M" : "ALL"} /></div>
+        <div className="mt-2"><CandlestickChart key={`${symbol}:${tf}`} data={bars} markers={[...markers.filter(marker => marker.direction === "SHORT" ? showShort : showEntry), ...(showSwing && tf === "daily" ? swing?.markers ?? [] : [])]} height={480} initialOverlays={["ema5", "ema10", "ema15", "ema20"]} currentIv={currentIv} priceLines={[...(priceLines ?? []), ...swingLines]} initialRange={tf === "daily" ? "3M" : "ALL"} /></div>
       )}
+      {tf === "daily" && entryResearch && <div className="mt-2 space-y-1 text-xs">
+        <p className={entryResearch.latest?.strategy === "countertrend" || entryResearch.status === "unavailable" ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>{entryResearch.latest?.reason || entryResearch.reason || "等待完整日线核验。"}</p>
+        <p className="text-muted-foreground">观＝观察；确＝收盘确认；入＝次开盘假设入场；失/离＝失效或回放退出。窗口 {entryResearch.contract?.hold_sessions ?? "--"} 个交易日；不是已验证买点、盈利概率或真实成交。</p>
+      </div>}
+      {tf === "daily" && shortResearch && <p className="mt-2 text-xs text-muted-foreground">空观＝反弹受阻观察；空确＝收盘跌破确认；空入＝次开盘假设开空；回补＝空头退出；空失＝观察失效。窗口 {shortResearch.contract?.hold_sessions ?? "--"} 个交易日。借券、召回和股息补偿未核验，不是 Put 盈利概率；多空是独立研究，不能相加当作组合收益。</p>}
       {tf === "daily" && showSwing && swing?.status !== "disabled" && <p className="mt-2 text-[11px] text-muted-foreground">v-swing 买卖点为实验性手法复刻，回放标记不是实盘成交；匹配强度不是盈利胜率。入场/风控位按最初信号冻结，+1R 后保本调整最早下一交易日生效。卖点仅为持仓离场参考。</p>}
       {note && <p className="mt-1 text-[11px] text-muted-foreground">{note}</p>}
     </section>

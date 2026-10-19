@@ -93,6 +93,10 @@ def nyse_holidays(year: int) -> set[date]:
     }
     if year >= 2022:
         hols.add(_observed(date(year, 6, 19)))  # Juneteenth
+    if year == 2025:
+        # Announced before the closure, not a missing price observation.
+        # https://www.nasdaqtrader.com/TraderNews.aspx?id=ETA2024-87
+        hols.add(date(2025, 1, 9))  # National Day of Mourning for Jimmy Carter.
     return hols
 
 

@@ -271,6 +271,45 @@ def ensure_database() -> Path:
                 CREATE INDEX IF NOT EXISTS idx_predictions_pending
                 ON predictions(resolved, as_of_date);
 
+                CREATE TABLE IF NOT EXISTS portfolio_forward_runs (
+                    run_id TEXT PRIMARY KEY,
+                    registered_at TEXT NOT NULL,
+                    first_signal_date TEXT NOT NULL,
+                    active INTEGER NOT NULL CHECK(active IN (0,1)),
+                    paused_at TEXT,
+                    recipe_json TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_forward_active
+                ON portfolio_forward_runs(active) WHERE active=1;
+                CREATE TABLE IF NOT EXISTS portfolio_forward_batches (
+                    batch_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    signal_date TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    board_generated_at TEXT NOT NULL,
+                    snapshot_id TEXT,
+                    roster_hash TEXT NOT NULL,
+                    declared_count INTEGER NOT NULL,
+                    member_count INTEGER NOT NULL,
+                    is_primary INTEGER NOT NULL CHECK(is_primary IN (0,1)),
+                    quality_json TEXT NOT NULL,
+                    members_json TEXT NOT NULL,
+                    contract_json TEXT NOT NULL,
+                    UNIQUE(run_id, signal_date, roster_hash)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_forward_primary
+                ON portfolio_forward_batches(run_id, signal_date) WHERE is_primary=1;
+                CREATE INDEX IF NOT EXISTS idx_portfolio_forward_date
+                ON portfolio_forward_batches(run_id, signal_date DESC, recorded_at DESC);
+
+                CREATE TABLE IF NOT EXISTS portfolio_forward_evidence (
+                    batch_id TEXT PRIMARY KEY,
+                    recorded_at TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
                 -- Immutable stock-direction shadow predictions for the long-option
                 -- board. They never feed the existing pullback_hv calibration.
                 CREATE TABLE IF NOT EXISTS long_option_direction_predictions (

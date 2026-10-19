@@ -36,7 +36,10 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import yfinance as yf
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.routing import APIRoute
+from starlette.routing import Match
+from urllib.parse import urlsplit
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -1029,6 +1032,11 @@ def _validate_api_auth(
     api_key = _configured_api_key()
     if not api_key:
         if _is_local_client(request):
+            if request.method not in {"GET", "HEAD", "OPTIONS"} and not _local_mutation_origin_allowed(request):
+                raise HTTPException(status_code=403, detail="Local mutation requires a trusted loopback Origin")
+            return
+        if _anonymous_snapshot_read(request):
+            request.state.anonymous_snapshot = True
             return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1042,6 +1050,9 @@ def _validate_api_auth(
 
 def _is_local_client(request: Request) -> bool:
     """Return whether the request originates from a loopback client."""
+    headers = getattr(request, "headers", {})
+    if any(name in headers for name in ("forwarded", "x-forwarded-for", "cf-connecting-ip", "x-real-ip")):
+        return False
     host = request.client.host if request.client else ""
     if host in {"localhost", "testclient"}:
         return True
@@ -1050,9 +1061,6 @@ def _is_local_client(request: Request) -> bool:
     except ValueError:
         return False
     if ip.is_loopback:
-        return True
-    # Trust the Cloudflare tunnel (private Docker-network peer) when opted in.
-    if _env_flag_enabled(_TUNNEL_TRUST_ENV) and ip.is_private:
         return True
     return _trusted_docker_loopback_ip(ip)
 
@@ -1117,14 +1125,7 @@ async def require_local_or_auth(
     loopback clients so an API server bound to 0.0.0.0 cannot accept remote
     credential reads or writes in dev mode.
     """
-    if _configured_api_key():
-        await require_auth(request, cred)
-        return
-    if not _is_local_client(request):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Settings access requires API_AUTH_KEY or a local loopback client",
-        )
+    await require_auth(request, cred)
 
 
 # ============================================================================
@@ -6730,36 +6731,19 @@ from distribution_risk_service import detect_distribution_risk
 
 
 def _sanitize_candle_rows(candles: list) -> list:
-    """Defend the chart + frontend volume profile against corrupt feed prints:
-    drop isolated whole-bar spikes (a 10x fat-finger that reverts next bar) and
-    clamp corrupt wicks (High/Low absurdly far from the bar body)."""
-    if not candles:
-        return candles
-    n = len(candles)
-    out: list = []
-    for i, k in enumerate(candles):
-        c = k.get("c")
-        if c is None:
-            continue
-        prev_c = candles[i - 1].get("c") if i > 0 else (candles[i + 1].get("c") if i + 1 < n else c)
-        next_c = candles[i + 1].get("c") if i + 1 < n else prev_c
+    """Validate each candle independently; never use a future neighbour.
+
+    A large move or wick alone is not proof of a corrupt print. Preserve valid
+    raw prices; malformed bars are not silently repaired into trading evidence.
+    """
+    out = []
+    for candle in candles or []:
         try:
-            cf, pc, nc = float(c), float(prev_c), float(next_c)
-        except (TypeError, ValueError):
-            out.append(k)
+            o, h, l, c = (float(candle[key]) for key in ('o', 'h', 'l', 'c'))
+            if all(math.isfinite(v) and v > 0 for v in (o, h, l, c)) and l <= min(o, c) and h >= max(o, c):
+                out.append(dict(candle))
+        except (KeyError, TypeError, ValueError):
             continue
-        if pc > 0 and nc > 0 and ((cf > 2.5 * pc and cf > 2.5 * nc) or (cf * 2.5 < pc and cf * 2.5 < nc)):
-            continue  # isolated bad-print bar -> drop
-        try:
-            of, hf, lf = float(k.get("o")), float(k.get("h")), float(k.get("l"))
-            body_hi, body_lo = max(of, cf), min(of, cf)
-            if hf > body_hi * 1.5:
-                k = {**k, "h": round(body_hi, 4)}
-            if 0 < lf < body_lo / 1.5:
-                k = {**k, "l": round(body_lo, 4)}
-        except (TypeError, ValueError):
-            pass
-        out.append(k)
     return out
 
 
@@ -7630,7 +7614,11 @@ def _single_candles(symbol: str, timeframe: str = "daily") -> Dict[str, Any]:
     """Cached daily chart first; intraday retains its existing provider path."""
     sym = str(symbol or "").upper().strip()
     tf = timeframe if timeframe in _CANDLE_CFG else "daily"
-    cache_key = f"single_candles:v3:{sym}:{tf}"
+    from priority_board_service import PULLBACK_HV_HORIZON
+    from pullback_parameter_service import ranking_settings
+    from pullback_entry_research import VERSION as ENTRY_RESEARCH_VERSION
+    entry_settings = ranking_settings()
+    cache_key = f"single_candles:v6:{ENTRY_RESEARCH_VERSION}:{sym}:{tf}:{PULLBACK_HV_HORIZON}:{entry_settings['version']}"
     cached = cache_get(cache_key)
     daily_frame = None
     daily_source = None
@@ -7684,42 +7672,36 @@ def _single_candles(symbol: str, timeframe: str = "daily") -> Dict[str, Any]:
                                     "l": prices[2], "c": prices[3], "v": volume if math.isfinite(volume) else 0})
                 except (TypeError, ValueError, KeyError):
                     continue
-    candles = _sanitize_candle_rows(candles)  # drop bad prints / clamp corrupt wicks
-    # Daily only: mark historical pullback_hv triggers (the validated buy signal),
-    # using the exact backtest replay collector so markers are real, not faked.
+    candles = _sanitize_candle_rows(candles)
+    # Causal research timeline, not legacy percentile-selected green buy marks.
     markers: list = []
+    entry_research = None
+    short_entry_research = None
     if tf == "daily" and candles:
         try:
-            from scripts.research_signal_framework_backtest import _collect_symbol_events
-            import pandas as _pd
-
-            frame = daily_frame if daily_frame is not None else get_daily_history(sym, period="2y")[0]
-            # include_unresolved=True also scores the trailing ~10 sessions (today
-            # included) whose forward return is not measurable yet, so a fresh
-            # pullback_hv setup gets a LIVE buy marker -- the historical-only
-            # collector structurally skips the last `horizon` bars.
-            evs = _collect_symbol_events(sym, frame, 10, min_launch_score=0.0, min_tunnel_score=0.0,
-                                         cooldown_days=5, include_unresolved=True)
-            scored = [e for e in evs if e.get("pullback_hv_score") is not None]
-            # Cutoff from RESOLVED history only, so the live bar uses the same bar as past Bs.
-            resolved_vals = sorted(e["pullback_hv_score"] for e in scored if e.get("resolved"))
-            if resolved_vals:
-                cutoff = max(0.58, resolved_vals[int(0.8 * (len(resolved_vals) - 1))])  # top ~20% (oversold + HV expanding)
-                cl = _pd.to_numeric(frame["Close"], errors="coerce")
-                close_map = {ts.strftime("%Y-%m-%d"): float(v) for ts, v in zip(frame.index, cl) if _pd.notna(v)}
-                for e in scored:
-                    if e["pullback_hv_score"] >= cutoff:
-                        px = close_map.get(e["date"])
-                        if px:
-                            live = not e.get("resolved", True)
-                            markers.append({
-                                "time": e["date"], "price": round(px, 2), "side": "BUY", "live": live,
-                                "reason": (f"今日/近期 pullback_hv 设置 {e['pullback_hv_score']:.2f}（未到期）" if live
-                                           else f"pullback_hv {e['pullback_hv_score']:.2f}"),
-                            })
-                markers = markers[-60:]  # cap
+            from pullback_entry_research import EntryConfig, build_entry_timeline
+            # Keep malformed raw bars visible to the quality gate; sanitizing
+            # the display must not bridge a missing session in a research path.
+            frame = daily_frame
+            if frame is None or frame.empty:
+                frame = pd.DataFrame(rows).rename(columns={'o':'Open','h':'High','l':'Low','c':'Close','v':'Volume'})
+                frame.index = pd.to_datetime(frame['t'], unit='ms', utc=True).dt.tz_localize(None)
+            timeline = build_entry_timeline(sym, frame, EntryConfig(hold_sessions=PULLBACK_HV_HORIZON,
+                weights=(entry_settings['oversold_weight'], entry_settings['volatility_weight'])))
+            markers = timeline['markers']
+            entry_research = {key: timeline[key] for key in ('status','contract','latest','note') if key in timeline}
         except Exception as exc:
-            console.log(f"pullback markers failed {sym}: {str(exc)[-150:]}")
+            entry_research = {'status':'unavailable', 'reason':type(exc).__name__, 'latest':{}}
+            console.log(f"pullback research markers unavailable {sym}: {type(exc).__name__}")
+        try:
+            from rebound_short_research import ShortEntryConfig, build_short_timeline
+            short_timeline = build_short_timeline(sym, frame, ShortEntryConfig(hold_sessions=PULLBACK_HV_HORIZON))
+            markers.extend(short_timeline['markers'])
+            markers.sort(key=lambda item: item['time'])
+            short_entry_research = {key: short_timeline[key] for key in ('status','contract','latest','note','reason') if key in short_timeline}
+        except Exception as exc:
+            short_entry_research = {'status':'unavailable', 'reason':type(exc).__name__, 'latest':{}}
+            console.log(f"short research markers unavailable {sym}: {type(exc).__name__}")
     as_of_date = datetime.fromtimestamp(candles[-1]["t"] / 1000, timezone.utc).date().isoformat() if candles else None
     from market_calendar import most_recent_session
     stale = bool(tf == "daily" and as_of_date and as_of_date < most_recent_session().isoformat())
@@ -7734,6 +7716,8 @@ def _single_candles(symbol: str, timeframe: str = "daily") -> Dict[str, Any]:
     out = {
         "available": bool(candles), "timeframe": tf, "symbol": sym,
         "candles": candles, "count": len(candles), "markers": markers, "delayed": True,
+        "entry_research": entry_research,
+        "short_entry_research": short_entry_research,
         "source": source if candles else None, "as_of_date": as_of_date,
         "stale": stale,
         "reason": massive_error or ("no_chart_data" if not candles else None),
@@ -11850,6 +11834,102 @@ register_alpha_routes(app)
 # ============================================================================
 # Main Entry Point
 # ============================================================================
+
+def _local_mutation_origin_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True  # Existing local CLI does not send an Origin.
+    try:
+        parsed = urlsplit(origin)
+        host = parsed.hostname or ""
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        if parsed.scheme not in {"http", "https"} or not loopback or parsed.username or parsed.password:
+            return False
+        if parsed.path or parsed.query or parsed.fragment:
+            return False
+        allowed = _parse_cors_origins(os.getenv("CORS_ORIGINS"))
+        return origin in allowed or origin == str(request.base_url).rstrip("/")
+    except (ValueError, RuntimeError):
+        return False
+
+
+def _anonymous_snapshot_read(request: Request) -> bool:
+    # This single reviewed endpoint has no watchlist/account/file contents.
+    # All other API reads remain private until explicitly reviewed.
+    if not _env_flag_enabled(_TUNNEL_TRUST_ENV) or request.method != "GET" or request.url.path != "/macro-panic-regime":
+        return False
+    if any(value.lower() not in {"false", "0"} for value in request.query_params.getlist("force_refresh")):
+        return False
+    try:
+        ip = ipaddress.ip_address(request.client.host if request.client else "")
+        return ip.is_private
+    except ValueError:
+        return False
+
+
+@app.middleware("http")
+async def _api_permission_boundary(request: Request, call_next):
+    """Cover API routes without dependencies too; leave SPA/static files public."""
+    path = request.url.path
+    if request.method == "OPTIONS" or (path == "/health" and request.method in {"GET", "HEAD"}):
+        return await call_next(request)
+    if (request.method == "GET" and "text/html" in request.headers.get("accept", "")
+            and _is_spa_html_route(path) and (_FRONTEND_DIST / "index.html").exists()):
+        return await call_next(request)
+    matched = next((route for route in app.routes if isinstance(route, APIRoute)
+                    and route.matches(request.scope)[0] != Match.NONE), None)
+    if matched is None and path not in {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}:
+        return await call_next(request)
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    cred = HTTPAuthorizationCredentials(scheme=scheme, credentials=token) if scheme.lower() == "bearer" and token else None
+    stream = matched is not None and matched.path in {
+        "/sessions/{session_id}/events", "/swarm/runs/{run_id}/events", "/alpha/bench/{job_id}/stream",
+    }
+    try:
+        _validate_api_auth(request=request, cred=cred, allow_query=stream,
+                           query_api_key=request.query_params.get("api_key") if stream else None)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
+    return await call_next(request)
+
+
+@app.get("/portfolio-forward/status", dependencies=[Depends(require_auth)])
+async def get_portfolio_forward_status():
+    from portfolio_forward_service import status
+    return _json_safe(await asyncio.to_thread(status))
+
+
+@app.post("/portfolio-forward/register", dependencies=[Depends(require_auth)])
+async def post_portfolio_forward_register():
+    from portfolio_forward_service import register
+    return _json_safe(await asyncio.to_thread(register))
+
+
+@app.post("/portfolio-forward/pause", dependencies=[Depends(require_auth)])
+async def post_portfolio_forward_pause():
+    from portfolio_forward_service import pause
+    return _json_safe(await asyncio.to_thread(pause))
+
+
+@app.get("/portfolio-forward/batches/{batch_id}", dependencies=[Depends(require_auth)])
+async def get_portfolio_forward_batch(batch_id: str):
+    from portfolio_forward_service import batch_detail
+    result = await asyncio.to_thread(batch_detail, batch_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="前向批次不存在")
+    return _json_safe(result)
+
+
+@app.get("/portfolio-forward/batches/{batch_id}/signal-evidence", dependencies=[Depends(require_auth)])
+async def get_portfolio_forward_signal_evidence(batch_id: str):
+    from portfolio_forward_service import signal_evidence_detail
+    result = await asyncio.to_thread(signal_evidence_detail, batch_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="尚无前向信号证据")
+    return _json_safe(result)
+
+
 
 def serve_main(argv: list[str] | None = None) -> int:
     """Start the API server from CLI-style arguments."""

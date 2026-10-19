@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+## [2026-10-19] Causal Direction Research and Prospective Evidence Capture
+
+### Added
+- Separate trend-pullback and downtrend/rebound research states, close-confirmation rules and next-open replay; chart controls distinguish long observations, confirmations, hypothetical entries and short covers. Research markers are not calibrated buy/Put profit probabilities.
+- Cache-only fixed-protocol entry, event-exit, planned-risk and collateralized portfolio comparison scripts, with shared costs, calendar-quality checks and explicit partial historical event coverage. No paid downloads or automatic activation.
+- Explicit future-session registration in the existing SQLite database; immutable full declared candidate rosters link original live forecasts and freeze ranking, configuration and source identities. Partial/stale records remain visible; TopN or truncated caches cannot claim full coverage.
+- Independent raw setup evidence without historical shadow-position suppression, actual acquisition/completion timestamps, cached-byte hashes and local event-version snapshots. New private read endpoints do not start scans. Capture defaults to unregistered and simulated orders/returns remain disabled.
+
+### Fixed
+- Chart range dragging survives background updates, indicator changes and resize; explicit range/identity resets remain intentional.
+- Downward midterm structure is observation-only for long confirmation; invalid/missing sessions stop the old setup or holding replay rather than bridge unknown prices.
+- Source/price freshness and version guards reject historical backfill, future timestamps, conflicting immutable predictions and missed next-open fills. Canonical JSON comparisons avoid treating persisted weight arrays as changed tuple configurations.
+- Missing percentage values display unknown instead of zero; an allowed sizing budget is explicitly not an entry signal.
+- Private evidence APIs retain authentication; tunnel/private-network identity is not local authorization and unfamiliar Origins cannot mutate local state.
+
+### Evidence and Limitations
+- The completed historical studies did not demonstrate stable gains. In the fixed 2026 portfolio diagnostic, fixed-notional/equal-risk returns were -8.01%/-7.60% long, -11.16%/-10.57% short and -6.67%/-10.60% combined. Prespecified increment intervals crossed zero; queue reversal materially changed results. These are diagnostic estimates, not a reproduction of historical live board ranks.
+- Historic prices, provider/event datasets and private study artifacts are not distributed. Historical membership, adjustment and borrowing remain unverified; equity returns do not estimate option returns.
+- Forward evidence has no account execution/settlement yet. Input version retention and append-only completion of budget-limited members remain open; a hash alone cannot recreate a lost source file. No claim that all leakage or overfitting is eliminated.
+- Current public-copy checks and blocked checks are documented separately in `PUBLIC_RELEASE.md`; prior CI failures remain visible. Public opt-in defaults, branding and upstream attribution are preserved.
+
 ## [2026-10-16] Causal Validation and Versioned Forward Evidence
 
 ### Added
