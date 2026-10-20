@@ -83,7 +83,7 @@ docker compose up -d --no-deps vibe-trading
 | API认证 | `API_AUTH_KEY`，不要暴露无认证的私人部署 |
 | 外部MCP工具 | 从`config/agent.example.json`和`config/mcp-client.example.json`开始配置 |
 
-聚源是可选研究证据来源，不是项目联合品牌或收益背书。股票数据授权不等于OPRA期权授权；请核对报价日期和备用来源状态。
+聚源是可选研究证据来源，不为模型收益背书。股票数据授权不等于OPRA期权授权；请核对报价日期和备用来源状态。
 
 源码不包含密钥、带认证MCP地址、Cookies、数据库、供应商历史数据或私人训练标注。可选后台更新/训练需要明确配置，公开默认值不会自动激活新模型。
 
@@ -98,7 +98,7 @@ docker compose up -d --no-deps vibe-trading
 
 ## 更新与验证
 
-10月20日恢复 **StockSignalForge / easymoneysniper**，同步拆股记账、历史时点证据修复，并修复CI的夹具导入、合成数据、财报工作日和SDK异常兼容。
+10月20日同步拆股记账、历史时点证据修复，并修复CI的夹具导入、合成数据、财报工作日和SDK异常兼容。
 
 已发布的`162054e`在GitHub CI中 **3321项测试及45项子测试通过，2项既有跳过**。当前提交是否通过，请查看顶部实时徽标，不能把CI当作交易盈利证明。
 

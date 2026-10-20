@@ -78,7 +78,7 @@ docker compose up -d --no-deps vibe-trading
 | API認証 | `API_AUTH_KEY` |
 | 外部MCP | `config/agent.example.json`、`config/mcp-client.example.json` |
 
-GilDataは任意の証拠データ源で、共同ブランドや利益の保証ではありません。株価の契約にOPRAオプションが含まれるとは限りません。日時と代替データ源を確認してください。
+GilDataは任意の証拠データ源で、利益の保証ではありません。株価の契約にOPRAオプションが含まれるとは限りません。日時と代替データ源を確認してください。
 
 キー、認証付きMCP URL、Cookies、DB、業者の履歴データ、非公開学習ラベルは配布しません。バックグラウンド更新・学習は明示設定が必要で、新しいモデルは自動的には有効化されません。
 

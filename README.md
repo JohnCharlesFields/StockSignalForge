@@ -83,7 +83,7 @@ Do not use `docker compose down -v`. Cloning this repository does **not** copy h
 | API authentication | `API_AUTH_KEY`; do not expose an unauthenticated private installation |
 | External MCP tools | Start with `config/agent.example.json` and `config/mcp-client.example.json` |
 
-GilData is an optional evidence source, not the project brand or an endorsement of model returns. A data plan may cover stocks without covering OPRA options. Quote dates and fallback-source status matter.
+GilData is an optional evidence source, not an endorsement of model returns. A data plan may cover stocks without covering OPRA options. Quote dates and fallback-source status matter.
 
 Credentials, authenticated MCP URLs, Cookies, databases, historical provider datasets and private training annotations are not distributed. Optional background refresh/training features require explicit configuration; public defaults do not automatically activate a new model.
 
@@ -98,7 +98,7 @@ Credentials, authenticated MCP URLs, Cookies, databases, historical provider dat
 
 ## Updates and Verification
 
-The October 20 update restored **StockSignalForge / easymoneysniper**, hardened corporate-action accounting and temporal evidence, and repaired CI fixture imports, synthetic test data, calendar determinism and SDK exception compatibility.
+The October 20 update hardened corporate-action accounting and temporal evidence, and repaired CI fixture imports, synthetic test data, calendar determinism and SDK exception compatibility.
 
 The published `162054e` revision passed GitHub CI: **3,321 tests and 45 subtests passed; 2 existing skips**. Use the live badge above for the current revision, not as evidence of trading profitability.
 
