@@ -6,10 +6,13 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Core project guides in English, Chinese, Japanese, Korean and Arabic, with reciprocal language navigation, deployment instructions and explicit market/data boundaries.
 
 ### Changed
+- Clarified the primary scope as US equities and US-listed equity options; A-shares and Hong Kong stocks remain under adaptation. Provider attribution remains in data/integration documentation, not the product name.
 
 ### Fixed
+- Aligned the HTML metadata and deployed brand with **StockSignalForge · easymoneysniper**. Updating source files alone does not update an already-running Docker image; rebuild and replace only the application service after active jobs finish, preserving named volumes.
 
 ## [2026-10-20] StockSignalForge Branding and Historical Evidence Integrity
 

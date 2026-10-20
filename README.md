@@ -2,220 +2,128 @@
 
 **easymoneysniper**
 
+**English** | [中文](README_zh.md) | [日本語](README_ja.md) | [한국어](README_ko.md) | [العربية](README_ar.md)
+
 [![CI](https://github.com/JohnCharlesFields/StockSignalForge/actions/workflows/test.yml/badge.svg)](https://github.com/JohnCharlesFields/StockSignalForge/actions/workflows/test.yml)
 
-AI股票研究工作台，基于 [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) 框架构建，整合查行情、看新闻、筛选回调候选、研判个股、持仓复盘、策略回测等功能的一站式平台。
+An AI stock research workbench built on [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading). Quotes, news, pullback candidate screening, single-stock analysis, position review and strategy backtesting in one workspace.
 
-沿用上游 MIT 许可。聚源等数据源作为可配置的数据接入，能力、授权与配置要求见 [接入说明](GILDATA_MCP.md)，不作为项目联合品牌。
+> **Market focus: US equities and US-listed equity options. Mainland China A-shares and Hong Kong stocks are still being adapted.** Existing upstream adapters do not mean the entire research, calendar, data and validation workflow is supported for those markets.
 
-本项目提供研究辅助，不保证收益，不连接券商自动下单；数据源和上游项目不为研究结果背书。
+## Market Coverage
 
-## 最新更新 · 2026-10-20
-
-项目名称恢复为 **StockSignalForge**，前端 slogan 为 **easymoneysniper**，聚源接入说明保留在文档中。同步拆股记账、历史成员实际可知时间、完整事件版本、事前机会名册及校准可信度修复；不改已有概率数值或启用历史赢家。
-
-**历史交易统计已重算，首页新校准因证据不足未启用。** 六组固定规则的平均净收益区间均跨零；旧概率明确作为未验证研究参考，不能当作新实盘胜率。详见 [本次功能与 Bug 修复](wiki/RELEASE_20261020_ZH.md)、[更新日志](CHANGELOG.md) 和 [公开副本测试记录](PUBLIC_RELEASE.md)。本次推送不重启生产 Docker。
-
-## 前次更新 · 2026-10-19
-
-同步**多空因果研究、固定口径离线对照、前向完整候选与实际可知时间归档**。图表区分观察、收盘确认和次开盘假设入场；修复缩放条在背景更新后回弹、缺失百分比显示为0，以及缺交易日仍延续旧结构的问题。
-
-**实验没有证实稳定收益改善，不启用历史赢家。** 前向采集须手动注册，只从之后的完整交易日起记录；错过开盘不补成交，事件覆盖未知不冒充无风险。当前尚无新的模拟账户收益或期权盈利概率。功能、Bug和限制见 [10月19日公开说明](wiki/RELEASE_20261019_ZH.md)、[更新日志](CHANGELOG.md) 与 [实际测试记录](PUBLIC_RELEASE.md)。本次GitHub更新不部署或重启生产Docker。
-
-## 前次更新 · 2026-10-16
-
-本次公开同步**历史时间因果修复、离线时间隔离校准验证、前向账本版本归档**。新预测保存生成时的参数与曲线身份，按版本和持有窗口分别对账；旧记录不覆盖、不猜填。收盘入场研究概率不再冒充记录后开盘入场的校准概率。
-
-**验证没有证明策略改善**：新候选未通过概率质量、排名单调性与收益区间门槛，未启用；旧曲线仍是待审计的研究概率。修复已发现的未来信息缺陷，不等于保证全系统无泄漏或过拟合。功能、Bug与验证边界见 [10月16日公开说明](wiki/RELEASE_20261016_ZH.md) 和 [更新日志](CHANGELOG.md)。
-
-本次不包含私人历史样本、校准事件文件、凭据或交接记录；公开版自动训练和参数激活继续默认关闭，不重启生产Docker。
-
-## 上次更新 · 2026-10-10
-
-新增 **v-swing 实验性波段研究**：个股日线展示买卖点、冻结止损和 +2R 目标；回调榜优先最新完整交易日的新买点，同组沿用原收益校准概率排序。匹配强度不等于盈利胜率，独立盈利校准样本不足时不会替换主榜概率。
-
-同时同步公司介绍/行业一致预期与供应链图谱、60–90 天 Call 情景比较，并修复中文搜索、聚源日线空缓存导致跑批中止、新闻主角误识别、公司关系更新状态及博主更新卡住等问题。逐项功能、Bug 原因与修复边界见 [10月10日更新日志](CHANGELOG.md#2026-10-10-experimental-swing-research-and-reliability-fixes)。
-
-[中文功能与 Bug 修复说明](wiki/RELEASE_20261010_ZH.md) 列出了各问题的原因、处理方式和仍然存在的限制。
-
-公开版波段模块默认关闭，仅提供空标注模板；私人训练标注、行情缓存、数据库、Cookies、密钥与私人 MCP 地址不发布。准备自己的合法数据并通过审计后再启用，见 [波段研究说明](wiki/V_SWING_RESEARCH_ZH.md) 和 [期权情景口径](wiki/CALL_PLAN_RESEARCH_ZH.md)。本次发布不重启生产 Docker。
-
-### 新版个股日线：实验买卖点与风险参考
-
-买卖点可独立开关，保留原均线、博弈区和技术指标；显示入场、冻结止损、+2R 目标、止损距离和研究仓位参考。绿色新买点只是实验观察，不是实际交易；财报未知仍提示核验。
-
-![v-swing 日线实验买卖点与风险参考](assets/screenshots/desktop/13-v-swing-chart.png)
-
-### 新版公司介绍：具体公司、关系状态与同业市值
-
-上市身份与业务关系分别标识；美股代码可跳转个股研判。行业可比公司带日期和覆盖范围，不把同一宽行业自动称作直接竞对；缺失数据不伪造。
-
-![公司关系与同业市值参考](assets/screenshots/desktop/14-company-network.png)
-
-以上两张由用户提供，展示历史快照；“实验未校准”“关系待核验”等提示原样保留。图中的匹配强度、历史研究概率和关系整理都不是真实收益证明。
-
-## 前次更新 · 2026-10-09
-
-本次公开发布同步 **2026-10-08 已完成的代码优化**，并在10月9日统一品牌、补充文档及脱敏配置。完整记录见 [更新日志](CHANGELOG.md)。
-
-| 更新 | 内容与边界 |
+| Market | Current scope |
 | --- | --- |
-| 聚源公司与行业资料 | 个股页展示主营、FactSet/SIC分类与真实来源；保留原细分同行匹配 |
-| EPS / 营收预期证据 | 报告期、统计窗、上修/下修、分歧；均值变化只比较已归档的同口径前值，年度预期不混成下一季财报预期 |
-| 聚源中文资讯补充 | 原15分钟后台有界更新，实体/日期/市场过滤、去重及勾选保留；未核验摘要显示“待研判”，不编造原文链接或开盘涨幅 |
-| 缓存与证据归档 | 复用SQLite追加内容版本，保留首次采集时间；页面读取缓存、后台补齐，失败不清空有效字段，可能部分覆盖 |
-| DeepSeek 复核 | 在原模型流程中加入缓存证据，证据变化更新缓存键；不直接修改方向、校准概率或排序权重 |
-| 日批与数据日期 | 429退避、重试计额度、补洞失败分阶段记录；禁止旧行情/旧榜单冒充最新交易日，不保证外部接口永不失败 |
-| 前向验证与参数研究 | 首次预测冻结、新旧结算口径分离、负向置信区间说明；按时间滚动验证与持有期隔离，自动训练/激活在公开版默认关闭 |
-| 工具与回测兼容 | 按需读取运行产物、策略对比、上下文预算与MCP错误反馈；修补因子及账户指标边界 |
+| US equities | Main research workflow: daily candidates, charts, company context, news, watchlists and strategy research |
+| US equity options | Direction research, available IV/Greeks and manually calculated 60–90 DTE Call contract/exit scenarios, subject to data permissions and quality |
+| A-shares | Adaptation in progress; not a fully supported end-to-end workflow |
+| Hong Kong stocks | Adaptation in progress; not a fully supported end-to-end workflow |
 
-**验证边界：** 10月8日聚源集成的119项相关测试已通过；本次公开配置的验证另见 [配置与测试说明](PUBLIC_RELEASE.md)，不是全仓测试通过声明。参数研究候选未优于固定基线，未替换活跃参数或校准曲线。历史回放、研究概率、前向兑现与真实账户收益必须分开看；新数据尚未认证历史时点可用性，不据此宣称胜率提高。
+Research output is not a guaranteed buy/sell recommendation. This branch does not connect to a broker or submit live orders. SOXL execution experiments are simulations, not a live trading service.
 
-10月9日公开版定向回归274项通过，前端构建通过；全量GitHub CI实测2703项通过、6项仍失败，详情与待办公开记录在测试说明中。
+## Research Workspace
 
-## 界面预览
-
-[完整页面图册](SCREENSHOTS.md) · [恒生聚源（Glidata）MCP 接入说明](GILDATA_MCP.md)
-
-截图中的行情与研究结果为历史快照，移动端持仓为演示数据。
-
-### 回调买入榜：每日研究入口
-
-每天先看这张榜：哪些股票正在回调，哪些相对大盘更强，哪些有足够的流动性。可以筛选高流动性或深超卖标的，也可以查看候选连续出现的天数、排名变化和后续表现。
-
-榜单同时列出优先级、研究概率、相对强度、波动趋势和择时折扣。旧版校准目标是历史样本中扣除成本后跑赢自身基线；来源不完整的曲线只能视作研究概率，截图中的“已验证”不代表前向交易已获利。新旧结算口径分别对账，顶部会提示数据日期和过期状态。
-
-![回调买入榜：每日研究入口](assets/screenshots/desktop/01-priority-overview.png)
-
-[查看原图](assets/screenshots/desktop/01-priority-overview.png) · [更多截图](SCREENSHOTS.md#01-priority-overview)
-
-### 个股研判：K 线、均线与价位结构
-
-输入股票代码，就能查看 K 线、均线和关键价位。这里以 DELL 为例，叠加 EMA、历史买入标记、当前价、回踩区、停止买入线和止损线，方便把信号放回走势中看。
-
-支持日线、小时线和分钟线切换，以及 VOL、MACD、RSI、KDJ、HV 等指标。红绿背景表示买卖主导区域，POC 线标记成交密集价位。报价旁会注明收盘日期和缓存状态。
-
-![个股研判：K 线、均线与价位结构](assets/screenshots/desktop/03-stock-chart.png)
-
-[查看原图](assets/screenshots/desktop/03-stock-chart.png) · [更多截图](SCREENSHOTS.md#03-stock-chart)
-
-### 个股研判：新闻情绪、公司业务与产业链
-
-看价格之前，也要知道公司做什么。公司卡片列出行业、市值、财报日期、主营业务和产品，并整理上游供应商、下游客户、竞争对手及赛道地位。
-
-同页汇总近期新闻、来源和发布时间，按正面、中性、负面标注情绪，并给出短期影响估计。以 Dell 为例，可以一起查看 AI 服务器、存储、网络与 PC 业务的背景。新闻标签和影响值属于模型估计。
-
-![个股研判：新闻情绪、公司业务与产业链](assets/screenshots/desktop/04-stock-context.png)
-
-[查看原图](assets/screenshots/desktop/04-stock-context.png) · [更多截图](SCREENSHOTS.md#04-stock-context)
-
-### 个股研判：信号判定、隔夜 Alpha 与行动区间
-
-信号区同时展示校准胜率、回调状态、波动变化和相对大盘强度。比如这里的 DELL 正在回调，但波动还未扩张，页面会提示等待进一步确认。
-
-左侧是隔夜 Alpha 统计，包括胜率、平均超额、样本量、Beta 和与 SPY 的走势对比。右侧列出强势确认、回踩买入、停止追高、停止买入、止损和止盈价位。这些条件供盘中复核，不会自动下单；隔夜统计与回调信号分别计算。
-
-![个股研判：信号判定、隔夜 Alpha 与行动区间](assets/screenshots/desktop/05-stock-signal.png)
-
-[查看原图](assets/screenshots/desktop/05-stock-signal.png) · [更多截图](SCREENSHOTS.md#05-stock-signal)
-
-### 个股研判：AI 复核、支持因素与风险
-
-AI 复核会给出判断依据，也会列出反对理由。趋势、相对强度、波动、Gamma、宏观环境和估值等数据都能在支持因素与风险栏中找到，方便检查结论是否有数据支撑。
-
-下方汇总买入触发、停止买入、止损和止盈价位，并解释校准胜率、Beta 等指标的参考范围。模型给出的等待回踩或放弃条件与具体数值一起显示，避免只剩一句看多或看空。
-
-![个股研判：AI 复核、支持因素与风险](assets/screenshots/desktop/06-stock-ai-review.png)
-
-[查看原图](assets/screenshots/desktop/06-stock-ai-review.png) · [更多截图](SCREENSHOTS.md#06-stock-ai-review)
-
-### 盘前新闻：宏观事件卡片与阅读反馈
-
-盘前新闻可以一条条翻着看。每张卡片包含中文摘要、媒体来源、发布时间、涉及标的和事件标签；宏观新闻会单独标为全市场事件。
-
-右侧显示冲击分、预计开盘影响和波动带宽，并提供相关指数入口。英文原文与出处可以展开，底部勾选或跳过用于处理阅读队列。顶部还能查看后台刷新状态和最新入库时间。
-
-![盘前新闻：宏观事件卡片与阅读反馈](assets/screenshots/desktop/08-news-cards.png)
-
-[查看原图](assets/screenshots/desktop/08-news-cards.png) · [更多截图](SCREENSHOTS.md#08-news-cards)
-
-### 自选池：研究范围、备注与批量分析
-
-把自己关注的股票放进自选池，记下关注原因，后续研究就从这份名单开始。支持逐只添加和批量导入，也能直接运行自选池三层分析。
-
-列表汇总现价、涨跌幅、市值、PE、行业、20 日表现、60 日 Alpha、回调或启动状态、GEX 与财报日期。自选池的 Alpha 以纳斯达克／QQQ 为基准；数据补充进度和无信号状态也会显示。
-
-![自选池：研究范围、备注与批量分析](assets/screenshots/desktop/10-watchlist.png)
-
-[查看原图](assets/screenshots/desktop/10-watchlist.png) · [更多截图](SCREENSHOTS.md#10-watchlist)
-
-### 任务中心：每日扫描进度与运行结果
-
-每日扫描跑到哪了、上次为什么没完成，都可以在任务中心查看。页面显示股票池进度、计划时间、最近运行结果，以及新闻、事件和 AI 复核的更新状态。
-
-中断后可以接着跑未完成的股票池，也可以强制重跑或恢复榜单。各池的完成与复用情况逐项列出。飞书移动端入口在这里查看隧道状态和访问地址。
-
-![任务中心：每日扫描进度与运行结果](assets/screenshots/desktop/12-task-center.png)
-
-[查看原图](assets/screenshots/desktop/12-task-center.png) · [更多截图](SCREENSHOTS.md#12-task-center)
-
-## 功能地图
-
-| 模块 | 能做什么 |
+| Module | Purpose |
 | --- | --- |
-| 交易台 | 回调候选排序、连续监测、预测兑现对账与候选篮子 |
-| 个股研究 | 行情图表、公司与赛道背景、研究信号和风险价位 |
-| 新闻与观点 | 盘前卡片／清单、观点雷达与事件线索 |
-| 自选与持仓 | 管理研究范围、复盘成本和仓位、比较研究建议 |
-| 进阶研究 | 启动信号、实股机会、事件雷达、宏观风险与三维汇总 |
-| 策略验证 | 因子库与 Bench、回测详情、策略对比和相关性矩阵 |
-| 自动化与助手 | 任务中心、研究会话、工具反馈与 MCP 服务 |
-| 移动端 | 榜单、新闻、个股、持仓、自选和更多入口 |
+| Pullback board | Rank cached candidates, track their lifecycle and reconcile predictions with subsequent outcomes |
+| Single-stock analysis | Candlesticks, trend structure, causal research markers, company/industry context, supply-chain references and risk levels |
+| Options research | Distinguish Call/Put/observe directions; inspect available volatility data and compare contract/exit scenarios without inventing missing quotes |
+| News and creator radar | Prioritized news cards/list, recent-news summaries and transcript-based creator opinions with explicit source/availability states |
+| Watchlist and positions | Maintain research coverage, review positions and compare dated evidence |
+| Three-layer signals | Opportunity quality, launch timing/tunnel structure, event risk and qualified GEX evidence |
+| Validation and tasks | Factor studies, backtests, versioned forward evidence, scheduled scans, checkpoints and cache freshness |
 
-### 恒生聚源（Glidata）MCP 接入
+Features depend on the configured data sources. An unavailable IV, OI, volume, transcript, earnings date or historical membership remains unknown, not zero or fabricated evidence.
 
-通过 FinQuery 查询个股研究数据，解析后校验标的、日期、币种和单位，写入缓存与证据归档。普通读取接口不等待MCP；显式查询或用户启用的后台日批/个股富集/15分钟新闻更新可补齐数据。默认开关关闭，授权、覆盖与更新速度取决于服务实际返回。
+## Interface Preview
 
-前端使用 React，后端使用 FastAPI，支持 Docker 单容器部署，也提供供其他客户端调用的 MCP 服务。
+![Experimental daily-chart research and risk references](assets/screenshots/desktop/13-v-swing-chart.png)
 
-## 快速启动
+![Company relationships and dated industry comparisons](assets/screenshots/desktop/14-company-network.png)
 
-需要 Docker Desktop（Linux 容器模式）。在仓库根目录执行：
+Screenshots are historical research snapshots, not return verification. See the [full gallery](SCREENSHOTS.md). Documentation languages do not imply that every application screen has been translated.
+
+## Docker Quick Start
+
+Use Docker Engine/Compose or Docker Desktop in Linux-container mode. Run at the repository root; do not overwrite an existing private environment file.
 
 ```powershell
-Copy-Item agent/.env.example agent/.env
-# 编辑 agent/.env，填写所用模型和数据服务的凭据
+if (!(Test-Path agent/.env)) { Copy-Item agent/.env.example agent/.env }
+# Configure agent/.env locally before starting the application.
 docker compose up -d --build vibe-trading
 ```
 
-打开 [本地网页](http://127.0.0.1:19090)，可用 [健康检查](http://127.0.0.1:19090/health) 验证服务。也可运行 Windows 的 ./start.ps1。
+Open [the workbench](http://127.0.0.1:19090). Check [service health](http://127.0.0.1:19090/health).
 
-```powershell
+```sh
 docker compose logs --tail 100 vibe-trading
 docker compose stop vibe-trading
 ```
 
-## 私有配置
+The published port is bound to localhost by default. Remote access requires authentication and explicitly trusted origins.
 
-真实配置只保存在本地，均已加入 .gitignore：
+### Updating an Existing Installation
 
-| 配置 | 位置或变量 |
+Wait for scans, calibration, enrichment and other active jobs to finish. Back up the existing SQLite database with its online backup API and preserve the named volumes before replacement.
+
+```sh
+docker compose build vibe-trading
+docker compose up -d --no-deps vibe-trading
+```
+
+Do not use `docker compose down -v`. Cloning this repository does **not** copy historical databases, caches, private configuration or Cookies; migrate those separately using a consistent backup.
+
+## Data and Private Configuration
+
+| Setting | Local configuration |
 | --- | --- |
-| 模型服务 | agent/.env 中的 LANGCHAIN_PROVIDER、LANGCHAIN_MODEL_NAME 和对应 API key |
-| 恒生聚源（Glidata）MCP | agent/.env 中的 GILDATA_MCP_URL 与 GILDATA_MCP_TOKEN；填写自己的 HTTPS 服务地址和 token |
-| 其他数据源 | agent/.env 中对应的 API key/token；按需启用 |
-| 外部 MCP 服务 | 默认 ~/.vibe-trading/agent.json；从 config/agent.example.json 的空模板开始配置 |
-| MCP 客户端 | config/mcp-client.example.json 仅提供本项目 MCP 服务的无凭据模板 |
-| API 访问认证 | agent/.env 中的 API_AUTH_KEY |
+| Model provider | `agent/.env`: `LANGCHAIN_PROVIDER`, `LANGCHAIN_MODEL_NAME` and your provider credentials |
+| GilData MCP | `GILDATA_MCP_URL` and `GILDATA_MCP_TOKEN`, supplied separately; see the [integration guide](GILDATA_MCP.md) |
+| Other market-data providers | Your own API keys and provider-specific entitlements |
+| API authentication | `API_AUTH_KEY`; do not expose an unauthenticated private installation |
+| External MCP tools | Start with `config/agent.example.json` and `config/mcp-client.example.json` |
 
-模型研究和授权数据查询需要对应的 API key。聚源可手动探针，也可显式启用有界后台刷新，费用按自己的授权计。MCP地址与token分别填写，不提交含认证参数的URL；没有预置服务地址。公开版不提供历史数据库、校准缓存或训练样本，缺失时必须显示未就绪，不能伪造结果。
+GilData is an optional evidence source, not the project brand or an endorsement of model returns. A data plan may cover stocks without covering OPRA options. Quote dates and fallback-source status matter.
 
-默认网页端口仅绑定本机。密钥、MCP 私有配置、运行数据库和研究会话不随源码发布。`daily_stock_analysis` 是可选适配模块，需自行准备外部服务镜像和数据库。
+Credentials, authenticated MCP URLs, Cookies, databases, historical provider datasets and private training annotations are not distributed. Optional background refresh/training features require explicit configuration; public defaults do not automatically activate a new model.
 
-## 开发与许可
+## Probability and Backtest Boundaries
 
-Python 3.11+，Node.js 20+。后端开发依赖：pip install -e ".[dev]"；前端在 frontend 目录执行 npm ci 与 npm run dev。开发前端的 API 目标通过 VITE_API_URL 配置。
+- Research scores, calibrated equity probabilities, net-positive trade ratios, SPY-relative alpha and option profitability probabilities are different measures.
+- A directionally correct equity forecast can still produce an option loss because of premium, bid/ask spreads, time decay and IV changes. Scenario tables are not probability-weighted expected values.
+- Experimental v-swing/long/short markers are not proof of profitable execution. Confirmed daily signals must not assume a fill at an already observed closing price.
+- Corporate-action units, actual information availability, historical membership and complete event revisions require explicit evidence. Missing evidence blocks certification.
+- Strict 5/8-session calibration rebuilding found insufficient time-verified historical samples; no replacement curve was activated. Existing numeric curves remain unverified research references.
+- Recomputed fixed-rule historical comparisons did not establish stable positive expectancy. Previously inspected history is not an untouched holdout, and passing software tests does not prove absence of all leakage or overfitting.
 
-上游说明见 [README.upstream.md](README.upstream.md) 与 [README_zh.upstream.md](README_zh.upstream.md)。部署配置以本仓库的示例为准。Wiki 部署需手动触发，并在 GitHub 配置自己的 Cloudflare secrets 和 CLOUDFLARE_PAGES_PROJECT 变量。
+## Updates and Verification
 
-本项目沿用 [MIT License](LICENSE)，第三方声明见 [NOTICE](NOTICE)。本仓库的开源许可不授予第三方数据服务的访问权限或数据再分发授权。
+The October 20 update restored **StockSignalForge / easymoneysniper**, hardened corporate-action accounting and temporal evidence, and repaired CI fixture imports, synthetic test data, calendar determinism and SDK exception compatibility.
+
+The published `162054e` revision passed GitHub CI: **3,321 tests and 45 subtests passed; 2 existing skips**. Use the live badge above for the current revision, not as evidence of trading profitability.
+
+- [Changelog](CHANGELOG.md)
+- [Test/configuration audit](PUBLIC_RELEASE.md) (Chinese)
+- [Latest detailed evidence and bug-fix notes](wiki/RELEASE_20261020_ZH.md) (Chinese)
+- [Experimental swing methodology](wiki/V_SWING_RESEARCH_ZH.md) (Chinese)
+- [Call scenario methodology](wiki/CALL_PLAN_RESEARCH_ZH.md) (Chinese)
+
+## Development
+
+Python 3.11+ and Node.js 20+; configure development API routing with `VITE_API_URL`.
+
+```sh
+python -m pip install -e ".[dev]"
+pytest --ignore=agent/tests/e2e_backtest --ignore=agent/tests/test_e2e_harness_v2.py --tb=short -q
+cd frontend
+npm ci
+npm run build
+```
+
+Real-model end-to-end tests require separate explicit opt-in and valid credentials. Never use production data volumes for isolated tests.
+
+## Attribution and License
+
+Built on [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading). Retained upstream references: [English](README.upstream.md) and [Chinese](README_zh.upstream.md).
+
+[MIT License](LICENSE), with third-party notices in [NOTICE](NOTICE). The software license does not grant access to a data service or permission to redistribute its data.
