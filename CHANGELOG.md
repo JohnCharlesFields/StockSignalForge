@@ -13,6 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - Aligned the HTML metadata and deployed brand with **StockSignalForge · easymoneysniper**. Updating source files alone does not update an already-running Docker image; rebuild and replace only the application service after active jobs finish, preserving named volumes.
+- Replaced the upstream VT favicon with the sidebar's 35 emblem and versioned its URL so browsers can discard the old icon cache.
 
 ## [2026-10-20] StockSignalForge Branding and Historical Evidence Integrity
 

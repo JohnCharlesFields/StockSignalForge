@@ -51,3 +51,14 @@ def test_shipped_html_and_sidebar_brand():
     assert "A股、港股仍在适配中" in html
     assert "StockSignalForge" in layout
     assert "easymoneysniper" in layout
+
+
+def test_favicon_matches_sidebar_and_invalidates_old_icon_cache():
+    from xml.etree import ElementTree
+
+    html = (ROOT / "frontend/index.html").read_text(encoding="utf-8")
+    icon = ElementTree.fromstring((ROOT / "frontend/public/favicon.svg").read_text(encoding="utf-8"))
+    ns = {"svg": "http://www.w3.org/2000/svg"}
+    assert icon.find("svg:title", ns).text == "StockSignalForge"
+    assert icon.find("svg:text", ns).text == "35"
+    assert 'href="/favicon.svg?v=stocksignalforge-1"' in html
