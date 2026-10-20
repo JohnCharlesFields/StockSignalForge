@@ -367,10 +367,11 @@ class TestEligibility:
         prices = [100.0 + i * 0.1 for i in range(30)]
         volumes = [1_000_000] * 30
         history = _make_history(prices, volumes)
-        report_date = date.today() + timedelta(days=8)  # 8 trading days ahead
+        now = date(2026, 6, 1)
+        report_date = (pd.Timestamp(now) + pd.offsets.BDay(8)).date()
 
         result = _check_eligibility(
-            "TEST", report_date, date.today(), history,
+            "TEST", report_date, now, history,
             data_quality_score=0.9, report_date_confidence=0.9, config=None
         )
         assert result["eligible"] is True

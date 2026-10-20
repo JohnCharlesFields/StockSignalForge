@@ -13,8 +13,9 @@ import pandas as pd
 
 from technical_signal_metrics import _runs, _tail_run
 from pullback_validation import shift_session
+from corporate_action_research import action_aware_replay
 
-VERSION = 'pullback_entry_research_v2'
+VERSION = 'pullback_entry_research_v3'
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,7 @@ def feature_history(frame, weights=(.5, .5)):
     return out
 
 
+@action_aware_replay
 def build_entry_timeline(symbol, frame, config=None):
     cfg = config or EntryConfig()
     if isinstance(cfg.hold_sessions, bool) or not isinstance(cfg.hold_sessions, int) or cfg.hold_sessions < 1:

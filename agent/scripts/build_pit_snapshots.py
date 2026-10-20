@@ -3,7 +3,7 @@
 
 R1 / contrarian calibration so far ran on the *current* S&P 500 constituents,
 which carries survivor bias (we never see oversold names that were later
-delisted).  This script rebuilds true membership for past dates from Wikipedia's
+delisted).  This script reconstructs membership for past dates from Wikipedia's
 constituent-changes table, so ``build_signal_calibration.py --pit-grid`` can
 replay with the names that were actually in the index at the time.
 
@@ -11,9 +11,9 @@ Reconstruction logic: start from today's constituents, then for every change
 that took effect *after* the as-of date, undo it -- the "Added" ticker was not
 yet a member, and the "Removed" ticker still was.
 
-Honest residual: yfinance has no prices for delisted / acquired removed names,
-so membership control is partial; the calibration report quantifies how many
-reconstructed members are unfetchable.
+This is retrospective reconstruction, not proof of contemporaneously observed
+membership or complete changes coverage. Removed-name prices may be missing;
+the calibration report must retain these limitations.
 """
 
 from __future__ import annotations
@@ -102,6 +102,12 @@ def membership_as_of(as_of: date, current: set[str], changes: list[dict[str, Any
     return members
 
 
+def change_grid(start: date, end: date, changes: list[dict[str, Any]]) -> list[date]:
+    if end < start or not changes:
+        raise ValueError('verified historical membership changes required')
+    return sorted({start} | {c['date'] for c in changes if start < c['date'] <= end})
+
+
 def _quarter_grid(quarters: int) -> list[date]:
     today = datetime.now(timezone.utc).date()
     anchor = date(today.year, ((today.month - 1) // 3) * 3 + 1, 1)  # start of current quarter
@@ -129,7 +135,7 @@ def main() -> None:
     current = _current_members(tables[0])
     changes = _parse_changes(tables[1]) if len(tables) > 1 else []
     if not changes:
-        print("[WARN] no changes table parsed; PIT reconstruction unavailable.", flush=True)
+        raise ValueError('no changes table parsed; PIT reconstruction unavailable')
 
     if args.dates.strip():
         grid = sorted(datetime.strptime(d.strip(), "%Y-%m-%d").date() for d in args.dates.split(",") if d.strip())
@@ -153,6 +159,9 @@ def main() -> None:
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": WIKI_URL,
+        "point_in_time_universe": False,
+        "survivorship_controlled": False,
+        "membership_method": "retrospective_wikipedia_changes_unverified",
         "current_members": len(current),
         "changes_parsed": len(changes),
         "changes_date_range": [str(changes[-1]["date"]), str(changes[0]["date"])] if changes else None,

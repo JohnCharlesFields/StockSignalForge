@@ -6,7 +6,7 @@ import pytest
 from entry_path_research import entry_gate
 from planned_risk_research import EXPERIMENTS, enrich_setup_features, planned_gate
 from right_side_entry_research import replay_right_side
-from test_right_side_entry_research import fixture, schedule_for
+from .test_right_side_entry_research import fixture, schedule_for
 
 
 @pytest.mark.parametrize('risk,allowed', [(0., False), (.999, False), (1., True), (3., True)])

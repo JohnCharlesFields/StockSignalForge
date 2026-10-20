@@ -10,7 +10,7 @@ import market_data_service as market
 from market_calendar import trading_days_back
 import portfolio_forward_service as forward
 import portfolio_signal_evidence as signals
-from test_portfolio_forward_service import env, activate, board, persist
+from .test_portfolio_forward_service import env, activate, board, persist
 
 
 def bars(n=110):
@@ -220,7 +220,7 @@ def test_missing_cache_is_unknown_and_successful_roster_is_preserved(env, monkey
 
 
 def test_signal_evidence_failure_does_not_revoke_daily_roster(env, monkeypatch):
-    from test_portfolio_forward_service import stub_board
+    from .test_portfolio_forward_service import stub_board
     import prediction_ledger_service as ledger
     activate(env)
     stub_board(env, monkeypatch, board(1))

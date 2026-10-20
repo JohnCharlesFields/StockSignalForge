@@ -23,13 +23,14 @@ import pandas as pd
 AGENT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENT))
 import cost_model
-import exit_model
 from launch_signal_service import _score_frame
 from market_data_service import external_data_scope
 from priority_board_service import _hv_rise, _pullback_hv_score
 from pullback_validation import block_interval, shift_session
 from signal_calibration import apply_calibration, build_calibration
 from pullback_parameter_service import ranking_settings
+from universe_history import available_snapshot, observation_time
+from corporate_action_research import prepare_history, MAX_UNVERIFIED_RATIO
 
 
 def digest(path):
@@ -45,6 +46,9 @@ def load_archives(root, universe):
         if not (source.startswith('live:') or source == 'wikipedia:pit_reconstruction'):
             continue
         day = date.fromisoformat(value['effective_date'])
+        captured = observation_time(value.get('captured_at'))
+        if captured is None:
+            continue
         members = set(value.get('tickers') or [])
         if not members:
             continue
@@ -54,12 +58,14 @@ def load_archives(root, universe):
                          'source': source, 'members': len(members), 'captured_at': value.get('captured_at')})
     if not archives:
         raise ValueError('No non-fallback archived membership; current holdings cannot substitute')
+    archives.sort(key=lambda row: (row['date'], observation_time(row['captured_at'])))
     return archives, manifest
 
 
 def member_at(archives, symbol, day):
-    eligible = [row for row in archives if row['date'] <= day]
-    return bool(eligible and symbol in eligible[-1]['members'])
+    eligible = [row for row in archives if available_snapshot(
+        dict(effective_date=str(row['date']), captured_at=row.get('captured_at')), str(day))]
+    return bool(eligible and symbol in max(eligible, key=lambda row: (row['date'], observation_time(row['captured_at'])))['members'])
 
 
 def read_bars(path):
@@ -80,11 +86,31 @@ def valid_bars(frame):
         return False
     if (frame.High < prices.max(axis=1)).any() or (frame.Low > prices.min(axis=1)).any():
         return False
-    ratio = frame.Close / frame.Close.shift(1)
-    return not ((ratio > 2.5) | (ratio < 1 / 2.5)).any()
+    prior = frame.Close.shift(1)
+    ratios = pd.concat([frame.Close / prior, frame.Open / prior], axis=1)
+    return not ((ratios > MAX_UNVERIFIED_RATIO) | (ratios < 1 / MAX_UNVERIFIED_RATIO)).any().any()
 
 
-def event_label(stock, spy, index, horizon, baseline):
+def known_quality_baseline(frame, horizon):
+    """Matured close-to-open paths only; today's later candle is irrelevant."""
+    prices = frame[['Open','High','Low','Close']]
+    valid = pd.Series(np.isfinite(frame.to_numpy(dtype=float)).all(axis=1), index=frame.index)
+    valid &= (prices > 0).all(axis=1) & (frame.Volume > 0)
+    valid &= (frame.High >= prices.max(axis=1)) & (frame.Low <= prices.min(axis=1))
+    ratios = pd.concat([frame.Close/frame.Close.shift(1), frame.Open/frame.Close.shift(1)], axis=1)
+    valid &= ~((ratios > MAX_UNVERIFIED_RATIO) | (ratios < 1/MAX_UNVERIFIED_RATIO)).any(axis=1)
+    path_ok = valid.shift(1).rolling(horizon, min_periods=horizon).min().eq(1)
+    consecutive = pd.Series(False, index=frame.index)
+    for i in range(horizon, len(frame)):
+        consecutive.iloc[i] = shift_session(frame.index[i-horizon].date(), horizon) == frame.index[i].date()
+    op = frame.Open
+    gap = op/frame.Close.shift(1)
+    exit_ok = np.isfinite(op) & (op > 0) & gap.between(1/MAX_UNVERIFIED_RATIO, MAX_UNVERIFIED_RATIO)
+    matured = (op/frame.Close.shift(horizon)-1).where(path_ok & consecutive & exit_ok)
+    return matured.expanding(min_periods=1).mean()
+
+
+def event_label(stock, spy, index, horizon, baseline, *, raw_entry_price=None):
     day = stock.index[index].date()
     sessions = [pd.Timestamp(shift_session(day, n)) for n in range(horizon + 1)]
     if not all(s in stock.index and s in spy.index for s in sessions):
@@ -95,6 +121,10 @@ def event_label(stock, spy, index, horizon, baseline):
     exit_prices = [float(df.loc[sessions[-1], 'Open']) for df in (stock, spy)]
     if not all(np.isfinite(p) and p > 0 for p in exit_prices):
         return None, 'exit_open_unavailable'
+    for df, price in zip((stock, spy), exit_prices):
+        ratio = price/float(df.loc[sessions[-2], 'Close'])
+        if not 1/MAX_UNVERIFIED_RATIO <= ratio <= MAX_UNVERIFIED_RATIO:
+            return None, 'exit_open_price_units_unknown'
     base = float(baseline.iloc[index])
     if not np.isfinite(base):
         return None, 'baseline_unknown_at_signal'
@@ -103,7 +133,8 @@ def event_label(stock, spy, index, horizon, baseline):
     benchmark = float(spy.loc[sessions[-1], 'Open'] / spy.loc[sessions[0], 'Close'] - 1)
     history = stock.iloc[max(0, index - 19):index + 1]
     adv = float((history.Close * history.Volume).mean())
-    cost = cost_model.equity_round_trip_cost(price=entry, avg_dollar_volume=adv)
+    cost = cost_model.equity_round_trip_cost(price=entry if raw_entry_price is None else raw_entry_price,
+                                           avg_dollar_volume=adv)
     gross = exit_price / entry - 1
     paired = pd.concat([stock.Close.pct_change(fill_method=None), spy.Close.pct_change(fill_method=None)], axis=1, sort=True).loc[:sessions[0]].dropna().tail(60)
     beta = None
@@ -112,7 +143,7 @@ def event_label(stock, spy, index, horizon, baseline):
     return {'horizon_days': horizon, 'exit_date': str(sessions[-1].date()),
             'label_available_at': str(sessions[-1].date()), 'forward_return': gross,
             'baseline_return': base, 'baseline_as_of': str(day),
-            'baseline_method': 'known_matured_expanding_v1', 'cost': cost,
+            'baseline_method': 'known_quality_matured_expanding_v2', 'cost': cost,
             'net_return': gross - cost, 'net_excess': gross - base - cost,
             'beta_alpha': gross - beta * benchmark - cost if beta is not None else None,
             'win': int(gross - base - cost > 0)}, None
@@ -126,6 +157,7 @@ def collect(root, protocol):
     if spy.empty:
         raise ValueError('SPY cache unavailable')
     frames_manifest = [{'symbol': 'SPY', 'sha256': spy.attrs['source_sha256'], 'bars': len(spy)}]
+    spy, _, spy_action_issue = prepare_history('SPY', spy, check_prices=False)
     events = []
     score_config = ranking_settings()
     counters = Counter(requested_symbols=len(symbols))
@@ -145,7 +177,10 @@ def collect(root, protocol):
         frames_manifest.append({'symbol': symbol, 'sha256': frame.attrs['source_sha256'], 'bars': len(frame),
                                 'first': str(frame.index[0].date()) if len(frame) else None,
                                 'last': str(frame.index[-1].date()) if len(frame) else None})
-        baselines = {h: exit_model.known_baseline_series(frame.Close, frame.Open, h) for h in horizons}
+        raw_closes = frame.Close.copy()
+        frame, _, action_issue = prepare_history(symbol, frame, check_prices=False)
+        frames_manifest[-1]['action_issue'] = action_issue
+        baselines = {h: known_quality_baseline(frame, h) for h in horizons}
         for index in range(protocol['score_lookback'] - 1, len(frame), protocol['cooldown_sessions']):
             day = frame.index[index].date()
             if not protocol['start'] <= str(day) <= protocol['test_end'] or not member_at(archives, symbol, day):
@@ -162,7 +197,8 @@ def collect(root, protocol):
             launch = scored['launch_score']
             score = _pullback_hv_score(launch, hv)
             for h in horizons:
-                label, failure = event_label(frame, spy, index, h, baselines[h])
+                label, failure = event_label(frame, spy, index, h, baselines[h],
+                                             raw_entry_price=float(raw_closes.at[frame.index[index]]))
                 row = {'ticker': symbol, 'date': str(day), 'score': score,
                        'launch_score': launch, 'hv_norm': np.clip(.5 + .5 * hv, 0, 1),
                        'oversold': 1 - launch, 'outcome_status': failure or 'resolved', 'horizon_days': h}
@@ -180,7 +216,9 @@ def collect(root, protocol):
                   'corporate_actions_verified': False, 'unseen_holdout': protocol['unseen_holdout'],
                   'account_backtest_verified': False, 'score_source': 'live_score_frame_and_priority_pullback_hv_score',
                   'label': 'close_signal_day_to_future_session_open_net_own_excess',
-                  'baseline_method': 'known_matured_expanding_v1',
+                  'baseline_method': 'known_quality_matured_expanding_v2',
+                  'corporate_action_policy': 'dated_forward_units_with_unknown_price_path_checks',
+                  'spy_action_issue': spy_action_issue,
                   'limitations': ['quarterly post-hoc reconstruction and sparse live archives, not daily historical member certification',
                                   'missing retired tickers and mixed raw/adjusted price provenance',
                                   'historical final period inspected by earlier research; not proven untouched',
@@ -314,11 +352,15 @@ def select_candidate(rows, horizon, protocol):
     return min(eligible, key=lambda r: (r['selection_brier'], protocol['candidates'].index(r['name'])))['name'], results
 
 
-def read_incumbent(root, horizon):
-    path = Path(root) / 'easymoneysniper.sqlite3'
+def read_incumbent(root, horizon, snapshot=None):
+    path = Path(snapshot) if snapshot else Path(root) / 'easymoneysniper.sqlite3'
     if not path.exists():
         return None
-    with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as conn:
+    if snapshot and (path.resolve() == (Path(root)/'easymoneysniper.sqlite3').resolve()
+                     or any(Path(str(path)+suffix).exists() for suffix in ('-wal','-shm'))):
+        raise ValueError('incumbent_snapshot_must_be_an_independent_closed_backup')
+    uri = path.resolve().as_uri()+'?mode=ro'+('&immutable=1' if snapshot else '')
+    with sqlite3.connect(uri, uri=True) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute('SELECT * FROM signal_calibration WHERE is_active=1 AND signal_type=? AND horizon_days=?', ('pullback_hv', horizon)).fetchone()
     return dict(row) if row else None
@@ -328,7 +370,9 @@ def validate(events, horizon, protocol, provenance, incumbent=None):
     rows = [r for r in events if r['horizon_days'] == horizon and r['outcome_status'] == 'resolved']
     selected, validation = select_candidate(rows, horizon, protocol)
     if selected is None:
-        return {'status': 'insufficient_data', 'validation': validation, 'activated': False}
+        return {'status': 'insufficient_data', 'validation': validation, 'activated': False,
+                'eligible_for_activation': False, 'resolved_events': len(rows),
+                'rejection_reasons': ['insufficient_time_verified_historical_samples']}
     train, _ = purged_fold(rows, protocol['test_start'], '9999-12-31', protocol)
     test = [r for r in rows if protocol['test_start'] <= r['date'] <= protocol['test_end']]
     if not test:
@@ -376,9 +420,12 @@ def validate(events, horizon, protocol, provenance, incumbent=None):
             'activated': False, 'statistical_note': 'time-isolated historical revalidation, not proof of an untouched final holdout or absence of all overfitting'}
 
 
-def run(root, protocol_path, output):
+def run(root, protocol_path, output, incumbent_snapshot=None):
     protocol_hash = digest(protocol_path)
     code_hash = digest(__file__)
+    code_paths = [Path(__file__), AGENT/'universe_history.py', AGENT/'corporate_action_research.py',
+                  AGENT/'config/corporate_actions_verified.json', AGENT/'cost_model.py']
+    code_manifest = {str(p.relative_to(AGENT)): digest(p) for p in code_paths}
     protocol = json.loads(Path(protocol_path).read_text(encoding='utf-8'))
     boundaries = [protocol['start'], *protocol['validation_starts'], protocol['test_start'], protocol['test_end']]
     if len(protocol['validation_starts']) != 3 or boundaries != sorted(set(boundaries)):
@@ -393,7 +440,8 @@ def run(root, protocol_path, output):
         raise ValueError('Test already consumed in this output directory; do not overwrite or tune on it')
     started = time.monotonic()
     horizons = [protocol['primary_horizon'], *protocol['secondary_horizons']]
-    incumbents = {h: read_incumbent(root, h) for h in horizons}
+    snapshot_hash = digest(incumbent_snapshot) if incumbent_snapshot else None
+    incumbents = {h: read_incumbent(root, h, incumbent_snapshot) for h in horizons}
     with external_data_scope(False):
         events, inventory = collect(root, protocol)
     event_path = output / 'events.jsonl'
@@ -405,9 +453,14 @@ def run(root, protocol_path, output):
         raise ValueError('Protocol changed during experiment; discard results')
     if digest(__file__) != code_hash:
         raise ValueError('Validator changed during experiment; discard results')
+    if code_manifest != {str(p.relative_to(AGENT)): digest(p) for p in code_paths}:
+        raise ValueError('Universe availability policy changed during experiment; discard results')
+    if incumbent_snapshot and digest(incumbent_snapshot) != snapshot_hash:
+        raise ValueError('Incumbent snapshot changed during experiment')
     report = {'generated_at': datetime.now(timezone.utc).isoformat(), 'protocol': protocol,
               'protocol_sha256': protocol_hash, 'event_sha256': digest(event_path),
-              'code_sha256': code_hash,
+              'code_sha256': code_hash, 'code_manifest': code_manifest,
+              'incumbent_snapshot_sha256': snapshot_hash,
               'cost_assumptions': cost_model.cost_summary(), 'inventory': inventory, 'results': results,
               'activated': False, 'external_requests': 0, 'elapsed_seconds': time.monotonic() - started}
     (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
@@ -420,5 +473,7 @@ if __name__ == '__main__':
     parser.add_argument('--data-root', type=Path, required=True)
     parser.add_argument('--protocol', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--incumbent-snapshot', type=Path,
+                        help='Independent closed SQLite backup only, never a live WAL database')
     args = parser.parse_args()
-    run(args.data_root, args.protocol, args.output)
+    run(args.data_root, args.protocol, args.output, args.incumbent_snapshot)

@@ -7617,8 +7617,9 @@ def _single_candles(symbol: str, timeframe: str = "daily") -> Dict[str, Any]:
     from priority_board_service import PULLBACK_HV_HORIZON
     from pullback_parameter_service import ranking_settings
     from pullback_entry_research import VERSION as ENTRY_RESEARCH_VERSION
+    from corporate_action_research import evidence_digest
     entry_settings = ranking_settings()
-    cache_key = f"single_candles:v6:{ENTRY_RESEARCH_VERSION}:{sym}:{tf}:{PULLBACK_HV_HORIZON}:{entry_settings['version']}"
+    cache_key = f"single_candles:v6:{ENTRY_RESEARCH_VERSION}:{sym}:{tf}:{PULLBACK_HV_HORIZON}:{entry_settings['version']}:{evidence_digest()}"
     cached = cache_get(cache_key)
     daily_frame = None
     daily_source = None

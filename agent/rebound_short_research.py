@@ -9,8 +9,9 @@ import pandas as pd
 from pullback_entry_research import _bars, feature_history
 from pullback_validation import shift_session
 from technical_signal_metrics import calculate_atr
+from corporate_action_research import action_aware_replay
 
-VERSION = 'rebound_short_research_v1'
+VERSION = 'rebound_short_research_v2'
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ def short_feature_history(frame, config=None):
     return out
 
 
+@action_aware_replay
 def build_short_timeline(symbol, frame, config=None):
     cfg = config or ShortEntryConfig()
     if (isinstance(cfg.hold_sessions, bool) or not isinstance(cfg.hold_sessions, int)

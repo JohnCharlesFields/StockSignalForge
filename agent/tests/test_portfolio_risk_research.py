@@ -8,7 +8,7 @@ import pytest
 import cost_model
 from event_exit_research import EventExitSchedule
 from portfolio_risk_research import PortfolioConfig, entry_plans, exit_at, replay_portfolio
-from test_right_side_entry_research import fixture, schedule_for
+from .test_right_side_entry_research import fixture, schedule_for
 
 
 EMPTY = EventExitSchedule([], {})
@@ -37,9 +37,9 @@ def test_invalid_risk_configuration(kw):
 def test_future_exit_fields_and_returns_are_not_input_features():
     f, p = setup()
     rows = [dict(variants=dict(baseline={**p, 'exit_date': '2099-01-01', 'net_return': 99., 'rank': 1}))]
-    before = entry_plans(rows)
+    before = entry_plans(rows, allow_completed_archive=True)
     rows[0]['variants']['baseline'].update(exit_date='1900-01-01', exit_price=0., net_return=-999., rank=999)
-    assert before == entry_plans(rows) == [p]
+    assert before == entry_plans(rows, allow_completed_archive=True) == [p]
     assert set(before[0]) == {'id', 'symbol', 'side', 'decision_date', 'entry_date', 'stop', 'adv'}
 
 
@@ -47,10 +47,10 @@ def test_invalid_and_duplicate_entry_timing():
     f, p = setup()
     rows = [dict(variants=dict(baseline={**p, 'entry_date': p['decision_date']}))]
     with pytest.raises(ValueError, match='next_session'):
-        entry_plans(rows)
+        entry_plans(rows, allow_completed_archive=True)
     row = dict(variants=dict(baseline=p))
     with pytest.raises(ValueError, match='duplicate'):
-        entry_plans([row, row])
+        entry_plans([row, row], allow_completed_archive=True)
 
 
 @pytest.mark.parametrize('side', ['LONG', 'SHORT'])
@@ -160,7 +160,7 @@ def test_missing_session_in_caller_calendar_cannot_shorten_holding_period():
 
 def test_daily_return_denominator_uses_the_declared_initial_capital():
     from scripts.validate_portfolio_risk import daily_returns
-    run = dict(snapshots=[dict(equity=50000.), dict(equity=55000.)])
+    run = dict(status='completed', metrics={}, snapshots=[dict(equity=50000.), dict(equity=55000.)])
     np.testing.assert_allclose(daily_returns(run, 50000.), [0., .1])
 
 

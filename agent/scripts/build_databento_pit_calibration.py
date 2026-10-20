@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Survivorship-bias-controlled (PIT) re-run of the pullback_hv win-rate, on
-Databento data, as the final robustness check on Codex's validated result.
+"""Exploratory pullback_hv calibration using retrospective index reconstruction.
+Historical membership completeness and announcement times remain unverified.
 
 Method (clean A/B -- same data, same code, only the filter differs):
   1. Universe = CURRENT S&P 500 members UNION every name REMOVED during the
@@ -10,13 +10,13 @@ Method (clean A/B -- same data, same code, only the filter differs):
   2. Pull one Databento OHLCV-1d panel for the union.
   3. Collect pullback_hv events (reusing the vetted _collect_symbol_events; each
      event carries its date).
-  4. Build a monthly point-in-time membership grid and split events into:
+  4. Build an effective-change-date membership grid and split events into:
        - all_events  : every event (== Codex's non-PIT methodology)
        - pit_events  : only events on dates the symbol was actually in the index
   5. Calibrate pullback_hv on BOTH and compare top-bucket net excess + CI.
 
-The delta = the survivorship-bias inflation. Reports residual coverage (how many
-removed names Databento actually returned). Never activates a curve.
+Differences are diagnostics, not a certified estimate of survivorship bias.
+Reports removed-name coverage. Never activates a curve.
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ from scripts.build_pit_snapshots import (  # noqa: E402
     _fetch_tables,
     _parse_changes,
     membership_as_of,
+    change_grid,
 )
 
 
@@ -105,9 +106,11 @@ def main() -> None:
     ap.add_argument("--require-cache", action="store_true",
                     help="Abort instead of calling Databento if the panel is not already cached (credit-safe).")
     ap.add_argument("--make-active", action="store_true",
-                    help="Activate the PIT-controlled pullback_hv curves as the live calibration.")
+                    help="Rejected: unverified reconstruction cannot activate a live curve.")
     ap.add_argument("--output", default=str(AGENT_DIR / "runs" / "databento_pit_calibration.json"))
     args = ap.parse_args()
+    if args.make_active:
+        raise ValueError('unverified_membership_reconstruction_cannot_activate_a_curve')
 
     start = args.start or _parse_period_start(args.period)
     start_d, end_d = date.fromisoformat(start), date.fromisoformat(args.end)
@@ -117,6 +120,7 @@ def main() -> None:
     tables = _fetch_tables()
     current = _current_members(tables[0])
     changes = _parse_changes(tables[1]) if len(tables) > 1 else []
+    grid = change_grid(start_d, end_d, changes)
     removed_in_window = sorted({c["removed"] for c in changes if c["removed"] and c["date"] >= start_d})
     union = sorted(current | set(removed_in_window))
     if args.max_symbols:
@@ -144,8 +148,7 @@ def main() -> None:
     print(f"[pit] databento returned {len(returned)}/{len(union)} | removed names returned "
           f"{len(removed_returned)}/{len(removed_in_window)} (residual survivorship if low)", flush=True)
 
-    # Monthly PIT membership grid.
-    grid = _month_grid(start_d, end_d)
+    # Exact effective dates avoid the old monthly membership lag.
     membership = {g: membership_as_of(g, current, changes) for g in grid}
     grid_sorted = sorted(membership)
 
@@ -178,11 +181,13 @@ def main() -> None:
         # to rebuild membership itself; we bridge the host-built curve in).
         pit_curve.setdefault("global", {})["provenance"] = {
             "price_source": f"databento:{args.dataset}",
-            "survivorship_controlled": True,
+            "survivorship_controlled": False,
+            "point_in_time_universe": False,
+            "membership_method": "retrospective_wikipedia_changes_unverified",
             "removed_names_covered": f"{len(removed_returned)}/{len(removed_in_window)}",
             "window": [start, args.end],
             "in_sample": True,
-            "note": "Databento 复权日线 + 去生存者偏差(PIT) 校准；样本内、单一区间，OOS 前谨慎。",
+            "note": "历史成分重建研究；变更表完整性、当时公告时间和价格复权均未认证，不可激活。",
         }
         report["horizons"][h] = {"all": all_cal, "pit": pit_cal,
                                  "pit_event_share": round(len(pit) / len(events), 4) if events else None,

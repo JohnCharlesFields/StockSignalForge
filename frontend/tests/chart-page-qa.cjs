@@ -58,6 +58,9 @@ async function main(){
   });
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
   await page.goto(base+'/single-stock-overnight?symbol=AAPL');
+  assert.equal(await page.title(),'StockSignalForge · easymoneysniper');
+  if(width===1440)assert.equal(await page.locator('aside').getByText('easymoneysniper',{exact:true}).count(),1);
+  if(width===390){await page.getByTitle('Collapse',{exact:true}).click();await page.waitForTimeout(250);}
   const canvas=page.locator('#stock-chart canvas').first();await canvas.waitFor();
   assert.equal(await page.getByText('预算校验通过 · 非入场信号',{exact:true}).count(),1);
   assert.equal(await page.getByText('ALLOW_OPEN',{exact:true}).count(),0);
@@ -81,6 +84,7 @@ async function main(){
   await page.mouse.move(box.x+box.width-2,box.y+5);
   await page.waitForTimeout(300);
   const dates=await page.evaluate(()=>[...new Set(window.__chartDates)].sort());
+  if(dates.length<2){await page.screenshot({path:path.join(out,`drag-failure-${width}.png`)});console.log(JSON.stringify({width,box,old,dates,left,right,y}));}
   assert(dates.length>1,'drag must repaint date ticks');assert(dates[0]<old,'drag must widen the history');
   await page.evaluate(()=>window.__chartDates=[]);
   // Existing background enrichment updates parent props after five seconds.

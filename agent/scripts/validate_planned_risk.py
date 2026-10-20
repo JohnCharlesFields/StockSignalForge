@@ -89,7 +89,8 @@ def main():
                     AGENT/'scripts/validate_event_exit.py', AGENT/'scripts/validate_right_side.py',
                     AGENT/'pullback_entry_research.py', AGENT/'rebound_short_research.py',
                     AGENT/'cost_model.py', AGENT/'market_calendar.py', AGENT/'pullback_validation.py',
-                    AGENT/'technical_signal_metrics.py', AGENT/'event_exit_research.py']
+                    AGENT/'technical_signal_metrics.py', AGENT/'event_exit_research.py', AGENT/'trading_calendar_history.py',
+                    AGENT/'corporate_action_research.py', AGENT/'config/corporate_actions_verified.json']
     code = {str(f.relative_to(AGENT)): sha(f.read_bytes()) for f in source_paths}
     design_hash = sha(Path(a.design).read_bytes())
     files = audit['input_manifest']['prices']

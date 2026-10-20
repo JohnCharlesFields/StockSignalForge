@@ -224,7 +224,9 @@ def main():
         path_diagnostics={period: {side: diagnose(diagnostics, period, side) for side in ('LONG', 'SHORT')} for period, _, _ in PERIODS},
         code_manifest={str(p.relative_to(AGENT)): sha(p.read_bytes()) for p in (
             Path(__file__), AGENT/'entry_path_research.py', AGENT/'right_side_entry_research.py', AGENT/'pullback_entry_research.py',
-            AGENT/'rebound_short_research.py', AGENT/'pullback_validation.py', AGENT/'cost_model.py', AGENT/'market_calendar.py')},
+            AGENT/'rebound_short_research.py', AGENT/'pullback_validation.py', AGENT/'cost_model.py', AGENT/'market_calendar.py',
+            AGENT/'event_exit_research.py', AGENT/'trading_calendar_history.py',
+            AGENT/'corporate_action_research.py', AGENT/'config/corporate_actions_verified.json')},
         input_manifest=dict(reference_sha256=sha(Path(args.reference).read_bytes()),
             opportunities_sha256=sha(Path(args.opportunities).read_bytes()), legacy_module_sha256=sha(Path(args.legacy_module).read_bytes()),
             calendar_sha256=sha(cp.read_bytes()), announcements_sha256=sha(ap.read_bytes()), spy_sha256=sha(spy_raw),

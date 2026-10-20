@@ -1,4 +1,5 @@
 from datetime import date
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -122,7 +123,7 @@ def test_peer_earnings_lag_keeps_unknown_target_date_for_manual_check() -> None:
     assert result[0]["target_report_date_note"] == "披露日待人工确认"
 
 
-def test_calendar_override_and_history_archive_are_auditable() -> None:
+def test_calendar_override_and_history_archive_are_auditable(tmp_path) -> None:
     corrected = _apply_calendar_override(
         {"symbol": "HPE", "latest_report_date": "2026-03-09", "next_report_date": None},
         {"next_report_date": "2026-06-02", "note": "checked IR page"},
@@ -131,12 +132,18 @@ def test_calendar_override_and_history_archive_are_auditable() -> None:
     assert corrected["calendar_override"] is True
     assert corrected["calendar_override_note"] == "checked IR page"
 
-    history_path = Path(__file__).with_name("peer_earnings_history_fixture.jsonl")
+    history_path = tmp_path / "history.jsonl"
+    history_path.write_text('\n'.join(json.dumps({'scan_time': value}) for value in ('a', 'b')), encoding='utf-8')
     assert load_peer_earnings_history(history_path, limit=1) == [{"scan_time": "b"}]
 
 
-def test_peer_earnings_history_summary_tracks_realized_followups() -> None:
-    path = Path(__file__).with_name("peer_earnings_history_summary_fixture.jsonl")
+def test_peer_earnings_history_summary_tracks_realized_followups(tmp_path) -> None:
+    path = tmp_path / "summary.jsonl"
+    signal = dict(symbol='TARGET', leader_symbol='LEADER', leader_report_date='2026-06-01',
+                  target_latest_price=100., expected_target_price=110., research_probability=.6)
+    rows = [dict(scan_time='2026-06-02', signals=[signal]),
+            dict(scan_time='2026-06-05', signals=[{**signal, 'target_latest_price':112.}])]
+    path.write_text('\n'.join(json.dumps(row) for row in rows), encoding='utf-8')
     summary = summarize_peer_earnings_history(path, limit=10)
 
     assert summary["resolved_count"] == 1

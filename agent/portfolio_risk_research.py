@@ -15,8 +15,10 @@ from backtest.models import Position
 from market_calendar import is_trading_day
 from pullback_validation import shift_session
 from trade_risk_rules import RISK_PER_TRADE, MAX_POSITION_RATIO
+from corporate_action_research import action_records, split_ratio, suspicious_ratio, ActionDataUnknown, prepare_history
 
-VERSION = 'archived_portfolio_risk_v1'
+VERSION = 'archived_portfolio_risk_v2'
+PRIORITY_VERSION = 'archived_portfolio_risk_v1'
 PLAN_FIELDS = ('id', 'symbol', 'side', 'decision_date', 'entry_date', 'stop', 'adv')
 
 
@@ -44,10 +46,15 @@ class PortfolioConfig:
             raise ValueError('invalid_portfolio_integer_limits')
 
 
-def entry_plans(rows):
+def entry_plans(rows, *, allow_completed_archive=False):
     plans = []
     for row in rows:
-        trade = row['variants']['baseline']
+        if 'prospective_plan' in row:
+            trade = row['prospective_plan']
+        elif allow_completed_archive:
+            trade = row['variants']['baseline']
+        else:
+            raise ValueError('completed_archive_requires_explicit_diagnostic_opt_in')
         if trade is None:
             continue
         plan = {k: trade[k] for k in PLAN_FIELDS}
@@ -62,7 +69,7 @@ def entry_plans(rows):
 
 
 def priority(plan):
-    return hashlib.sha256((VERSION+':'+plan['id']).encode()).hexdigest()
+    return hashlib.sha256((PRIORITY_VERSION+':'+plan['id']).encode()).hexdigest()
 
 
 def exit_at(bar, meta, age, phase, events=()):
@@ -123,6 +130,18 @@ class ArchivedPortfolio(GlobalEquityEngine):
             + self._calc_pnl(s, p.direction, p.size, p.entry_price, float(bars[s][field]))
             for s, p in self.positions.items())
 
+    def apply_split(self, symbol, ratio, day):
+        if ratio == 1 or symbol not in self.positions:
+            return
+        p, m = self.positions[symbol], self.meta[symbol]
+        size = p.size*ratio
+        if not math.isclose(size, round(size), abs_tol=1e-8):
+            raise ActionDataUnknown('fractional_cash_in_lieu_unverified:'+symbol+':'+day)
+        self.positions[symbol] = replace(p, size=round(size), entry_price=p.entry_price/ratio)
+        for key in ('entry_price', 'stop', 'target', 'risk_per_share'):
+            m[key] /= ratio
+        m['share_multiplier'] = m.get('share_multiplier', 1.)*ratio
+
     def allocate(self, plan, bar, marks, day, sizing):
         symbol = plan['symbol']
         if symbol in self.positions:
@@ -176,7 +195,8 @@ class ArchivedPortfolio(GlobalEquityEngine):
 
 
 def replay_portfolio(data, plans, days, schedule, *, mode='LONG', sizing='equal_risk',
-                     config=PortfolioConfig(), reverse_priority=False, require_closed=True, benchmark_returns=None):
+                     config=PortfolioConfig(), reverse_priority=False, require_closed=True, benchmark_returns=None,
+                     corporate_actions=None):
     if mode not in ('LONG', 'SHORT', 'BOTH') or sizing not in ('fixed_notional', 'equal_risk'):
         raise ValueError('invalid_portfolio_policy')
     days = list(days)
@@ -198,6 +218,12 @@ def replay_portfolio(data, plans, days, schedule, *, mode='LONG', sizing='equal_
     for event in schedule.exits:
         exits[event['exit_date']].append(event)
     book, snapshots = ArchivedPortfolio(config), []
+    actions = action_records(corporate_actions)
+
+    def unknown(reason, day):
+        return dict(version=VERSION, status='data_unknown', unknown_reason=reason, unknown_at=day,
+            metrics=None, entries=book.entries, trades=book.closed, snapshots=snapshots,
+            rejects=dict(book.rejects), active_end=len(book.positions), eligible_for_activation=False)
 
     def quote(symbol, day):
         stamp = pd.Timestamp(day)
@@ -211,6 +237,16 @@ def replay_portfolio(data, plans, days, schedule, *, mode='LONG', sizing='equal_
     for i, day in enumerate(days):
         book._bar_idx = i
         bars = {s: quote(s, day) for s in book.positions}
+        try:
+            for s in set(book.positions) | {p['symbol'] for p in entries.get(day, [])}:
+                factor = split_ratio(s, day, actions)
+                frame = frames[s]
+                previous = frame.loc[frame.index < pd.Timestamp(day)]
+                if not previous.empty and suspicious_ratio(float(quote(s, day).Open), float(previous.Close.iloc[-1]), factor):
+                    raise ActionDataUnknown('unverified_open_price_units:'+s+':'+day)
+                book.apply_split(s, factor, day)
+        except ActionDataUnknown as exc:
+            return unknown(str(exc), day)
         for s, p in list(book.positions.items()):
             m = book.meta[s]
             elapsed = (pd.Timestamp(day)-pd.Timestamp(m['last_borrow_day'])).days
@@ -225,16 +261,33 @@ def replay_portfolio(data, plans, days, schedule, *, mode='LONG', sizing='equal_
         conflicts = {p['symbol'] for p in candidates if len({x['side'] for x in candidates if x['symbol'] == p['symbol']}) > 1}
         seen_symbols = set()
         for plan in candidates:
+            plan = dict(plan)
             s = plan['symbol']
             if s in conflicts or s in seen_symbols:
                 book.rejects['conflicting_or_duplicate_candidate'] += 1
                 continue
             seen_symbols.add(s)
+            prefix = frames[s].loc[frames[s].index <= pd.Timestamp(plan['decision_date'])].tail(101)
+            if len(prefix) > 1:
+                _, _, invalid = prepare_history(s, prefix, actions)
+                if invalid:
+                    return unknown('decision_input_'+invalid, day)
+            for action in actions:
+                action_day = action.get('effective_date', '')
+                if action.get('symbol') == s and plan['decision_date'] < action_day <= day:
+                    try:
+                        factor = split_ratio(s, action_day, [action])
+                    except ActionDataUnknown as exc:
+                        return unknown(str(exc), day)
+                    plan['stop'] /= factor
             bars[s] = quote(s, day)
             book.allocate(plan, bars[s], bars, day, sizing)
         # All open orders are complete before any same-day high/low/close exit.
         for s in book.positions:
             b = bars[s]
+            prior = frames[s].loc[frames[s].index < pd.Timestamp(day)]
+            if not prior.empty and suspicious_ratio(float(b.Close), float(prior.Close.iloc[-1]), split_ratio(s, day, actions)):
+                return unknown('unverified_close_price_units:'+s+':'+day, day)
             if not all(math.isfinite(float(b[k])) and b[k] > 0 for k in ('High', 'Low', 'Close')):
                 raise ValueError('invalid_active_intraday_quote:'+s+':'+day)
             if b.High < max(b.Open, b.Close, b.Low) or b.Low > min(b.Open, b.Close, b.High):
@@ -259,7 +312,7 @@ def replay_portfolio(data, plans, days, schedule, *, mode='LONG', sizing='equal_
                     -p.entry_commission-book.meta[s]['borrow_paid'] for s, p in book.positions.items())
     assert math.isclose(equity.iloc[-1] if len(equity) else config.initial_cash, expected, abs_tol=1e-6)
     metrics = calc_metrics(equity, book.trades, config.initial_cash, bars_per_year=252, bench_ret=benchmark_returns)
-    return dict(version=VERSION, mode=mode, sizing=sizing, reverse_priority=reverse_priority,
+    return dict(version=VERSION, status='completed', mode=mode, sizing=sizing, reverse_priority=reverse_priority,
         metrics=metrics, entries=book.entries, trades=book.closed, snapshots=snapshots, rejects=dict(book.rejects),
         fees=sum(t['fees'] for t in book.closed), borrow=sum(t['borrow'] for t in book.closed),
         mean_gross_fraction=sum(s['gross_fraction'] for s in snapshots)/len(snapshots) if snapshots else 0.,

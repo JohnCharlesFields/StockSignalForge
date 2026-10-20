@@ -88,14 +88,16 @@ def test_open_target_exit_cannot_be_overridden_by_later_intraday_low():
     a = build_entry_timeline('TEST', frame, cfg)
     entry = next(t for t in a['transactions'] if t['held_sessions'] > 0)
     pos = frame.index.get_loc(pd.Timestamp(entry['entry_date']))
-    # Use a very large positive open, with later low below any previous stop.
-    frame.iloc[pos+1, frame.columns.get_loc('Open')] = 1000.
-    frame.iloc[pos+1, frame.columns.get_loc('High')] = 1010.
+    # A valid positive gap hits the target before a later intraday low.
+    # Unverified multi-fold price-unit changes are tested as unknown separately.
+    open_price = float(frame.Close.iloc[pos])*1.1
+    frame.iloc[pos+1, frame.columns.get_loc('Open')] = open_price
+    frame.iloc[pos+1, frame.columns.get_loc('High')] = open_price*1.01
     frame.iloc[pos+1, frame.columns.get_loc('Low')] = 1.
-    frame.iloc[pos+1, frame.columns.get_loc('Close')] = 500.
+    frame.iloc[pos+1, frame.columns.get_loc('Close')] = open_price*.99
     result = build_entry_timeline('TEST', frame, cfg)
     trade = next(t for t in result['transactions'] if t['entry_date'] == entry['entry_date'])
-    assert trade['exit_price'] == 1000.
+    assert trade['exit_price'] == open_price
     assert trade['exit_reason'] == 'gap_above_target'
 
 
@@ -118,7 +120,8 @@ def test_chart_api_does_not_read_legacy_percentile_collector(monkeypatch):
     monkeypatch.setattr(market_data_service, '_massive_get', lambda *a, **k: (_ for _ in ()).throw(AssertionError('network forbidden')))
     monkeypatch.setattr(legacy, '_collect_symbol_events', lambda *a, **k: (_ for _ in ()).throw(AssertionError('legacy chart path forbidden')))
     result = api_server._single_candles('TEST', 'daily')
-    assert result['entry_research']['contract']['version'] == 'pullback_entry_research_v2'
+    from pullback_entry_research import VERSION
+    assert result['entry_research']['contract']['version'] == VERSION
     assert result['entry_research']['contract']['hold_sessions'] == 8
     assert all(m['research_only'] for m in result['markers'])
 

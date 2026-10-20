@@ -298,12 +298,14 @@ def test_build_mcp_tool_wrappers_disambiguates_colliding_local_names() -> None:
 
 
 def test_build_mcp_tool_wrappers_retries_transient_discovery_failure() -> None:
+    error = mcp_types.ErrorData(code=mcp_types.CONNECTION_CLOSED, message="Connection closed")
+    from_error_data = getattr(McpError, "from_error_data", McpError)
     state = {
         "list_calls": 0,
         "call_calls": 0,
         "call_records": [],
         "list_outcomes": [
-            [McpError(mcp_types.ErrorData(code=mcp_types.CONNECTION_CLOSED, message="Connection closed"))][0],
+            from_error_data(error),
             [mcp_types.Tool(name="quote", description="Quote", inputSchema={"type": "object"})],
         ],
         "call_outcomes": [],

@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""True bear-market OOS for pullback_hv using Massive/Polygon deep history (5yr),
-PIT survivorship-controlled. Complements Databento (which only goes back to
-2023-03 and can't reach the 2022 bear).
+"""Exploratory historical pullback_hv study using Massive/Polygon.
+Retrospective membership reconstruction is not certified PIT or unseen OOS.
 
-Panel = Massive grouped-daily over the window (one call per trading day returns
-~12k tickers, INCLUDING names that were later removed -- so we get real
-survivorship control like Databento). We keep only the PIT S&P union members and
-filter each event to dates the symbol was actually in the index.
+Reads per-symbol aggregates for the current/removed-name union. Historical
+coverage, delistings, adjustment basis and dated membership evidence are not
+automatically certified by a successful download.
 
 Reuses the exact Databento-PIT logic (membership grid, event collection,
-calibration + cluster-bootstrap CI). Never activates a curve -- this is an OOS
-validation, the live active curve stays the Databento-PIT one.
+calibration + cluster-bootstrap CI). Never activates or modifies a live curve.
 
 Run (host, proxy for Wikipedia; Massive Starter = unlimited):
   HTTPS_PROXY=http://127.0.0.1:7890 MASSIVE_API_KEY=... \
@@ -36,9 +33,9 @@ if str(AGENT_DIR) not in sys.path:
 import cost_model  # noqa: E402
 import market_data_service as mds  # noqa: E402
 from scripts.build_databento_signal_calibration import _collect_events_from_frames  # noqa: E402
-from scripts.build_databento_pit_calibration import _calibrate, _fmt, _month_grid  # noqa: E402
+from scripts.build_databento_pit_calibration import _calibrate, _fmt  # noqa: E402
 from scripts.build_pit_snapshots import (  # noqa: E402
-    _current_members, _fetch_tables, _parse_changes, membership_as_of,
+    _current_members, _fetch_tables, _parse_changes, membership_as_of, change_grid,
 )
 
 
@@ -99,12 +96,12 @@ def main() -> None:
     print(f"[massive-pit] current={len(current)} removed_since_start={len(removed_in_window)} "
           f"union={len(union)} window={args.start}..{args.end}", flush=True)
 
+    grid = change_grid(start_d, end_d, changes) if pit_ok else [start_d]
     frames = _assemble_panel(union, start_d, end_d)
     returned = set(frames)
     removed_returned = sorted(set(removed_in_window) & returned)
     print(f"[massive-pit] removed names with data: {len(removed_returned)}/{len(removed_in_window)}", flush=True)
 
-    grid = _month_grid(start_d, end_d)
     membership = {g: membership_as_of(g, current, changes) for g in grid}
     grid_sorted = sorted(membership)
 
@@ -119,12 +116,14 @@ def main() -> None:
         return symbol in membership[chosen]
 
     report: dict[str, Any] = {
-        "generated_at": datetime.now(timezone.utc).isoformat(), "source": "massive:grouped-daily",
+        "generated_at": datetime.now(timezone.utc).isoformat(), "source": "massive:per-symbol-aggs",
         "window": [args.start, args.end], "cost_bps": cost_bps,
         "current_members": len(current), "removed_in_window": len(removed_in_window),
         "union": len(union), "symbols_with_data": len(frames),
         "removed_names_returned": removed_returned,
-        "survivorship_controlled": bool(pit_ok and removed_returned),
+        "survivorship_controlled": False, "point_in_time_universe": False,
+        "membership_method": "retrospective_wikipedia_changes_unverified" if pit_ok else "current_members_fallback",
+        "changes_table_available": pit_ok, "eligible_for_activation": False,
         "horizons": {},
     }
     rows_out = []
@@ -144,16 +143,16 @@ def main() -> None:
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    md = ["# Massive 2022 熊市样本外 (pullback_hv, PIT)", "",
-          f"- 窗口 {args.start} .. {args.end} | 源 Massive grouped-daily(复权) | cost {cost_bps}bps/边",
+    md = ["# Massive 历史成分重建研究 (pullback_hv，未认证)", "",
+          f"- 窗口 {args.start} .. {args.end} | 源 Massive per-symbol aggregates | cost {cost_bps}bps/边",
           f"- 并集 {len(union)}(当前{len(current)}+窗口内移除{len(removed_in_window)}) | 有数据 {len(frames)} | 移除名覆盖 {len(removed_returned)}/{len(removed_in_window)}", "",
           "| Horizon | 口径 | 事件 | 票数 | 顶桶净超额 | CI | 判定 |", "| ---: | --- | ---: | ---: | ---: | --- | --- |"]
     for h, a, p in rows_out:
-        for tag, c in (("非PIT", a), ("PIT受控", p)):
+        for tag, c in (("并集", a), ("成分重建（未认证）", p)):
             md.append(f"| {h}d | {tag} | {c['events']} | {c['clusters']} | {_fmt(c['top_excess'])} | "
                       f"[{_fmt(c['ci'][0])},{_fmt(c['ci'][1])}] | {'通过' if c['validated'] else '未通过'} |")
-    md += ["", "## 口径", "- 真·2022 熊市窗口的独立样本外检验；含被移除名(grouped-daily 提供其在市时价格)→生存者受控。",
-           "- 复权价(Massive adjusted)。未激活任何曲线。Databento 在线 active 曲线不受影响。"]
+    md += ["", "## 口径", "- 回顾性历史研究，不是未见测试集；移除成分覆盖不等于完整控制生存者偏差。",
+           "- 成分变更完整性、当时公告时间和复权未认证。未激活任何曲线，不修改旧线上曲线。"]
     out.with_suffix(".md").write_text("\n".join(md) + "\n", encoding="utf-8")
     print(f"\nWrote {out}\nWrote {out.with_suffix('.md')}", flush=True)
 

@@ -9,8 +9,9 @@ from pullback_entry_research import _bars, feature_history, build_entry_timeline
 from rebound_short_research import build_short_timeline
 from pullback_validation import shift_session
 from technical_signal_metrics import calculate_atr
+from corporate_action_research import action_aware_replay, prepare_history, shares_between
 
-VERSION = 'right_side_fixed_v1'
+VERSION = 'right_side_fixed_v2'
 POLICIES = ('current', 'strict', 'retest')
 MATURITY_SESSIONS = 15
 
@@ -22,7 +23,9 @@ def confirmation_opportunities(symbol, frame, side, timeline=None):
     stamps = {str(day.date()): day for day in frame.index}
     if len(stamps) != len(frame):
         raise ValueError('duplicate_calendar_dates_in_daily_input')
-    atr = calculate_atr(frame, 14)
+    normalized, factors, _ = prepare_history(symbol, frame) if not frame.attrs.get('corporate_action_basis') else (
+        frame, {str(d.date()):1. for d in frame.index}, None)
+    atr = calculate_atr(normalized, 14)
     adv = (frame.Close*frame.Volume).rolling(20).mean()
     for marker in timeline['markers']:
         day, stage = marker['time'], marker['stage']
@@ -31,9 +34,10 @@ def confirmation_opportunities(symbol, frame, side, timeline=None):
         elif stage == 'INVALIDATED':
             watch = None
         elif stage == 'CONFIRMED' and watch and day in by_day:
+            factor = shares_between(symbol, watch, day) if not frame.attrs.get('corporate_action_basis') else 1.
             seeds.append(dict(id=symbol+':'+side+':'+day, date=day, setup_date=watch,
-                high=float(by_day[watch].High), low=float(by_day[watch].Low),
-                atr=float(atr.at[stamps[day]]), adv=float(adv.at[stamps[day]])))
+                high=float(by_day[watch].High)/factor, low=float(by_day[watch].Low)/factor,
+                atr=float(atr.at[stamps[day]])/factors.get(day, 1.), adv=float(adv.at[stamps[day]])))
             watch = None
     return seeds
 
@@ -56,6 +60,7 @@ def event_matches(event, symbol):
     return event['kind'] != 'EARNINGS' or symbol in event['subjects']
 
 
+@action_aware_replay
 def replay_right_side(symbol, frame, side, policy='current', schedule=None, opportunities=None, context=None,
                       *, experiment='baseline', market_context=None):
     from entry_path_research import EXPERIMENTS, entry_gate

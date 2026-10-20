@@ -12,7 +12,7 @@ import pandas as pd
 import app_database as db
 import v_swing_service as service
 from v_swing_model import config
-from test_v_swing_model_unittest import bars
+from .test_v_swing_model_unittest import bars
 
 
 def score(symbol="AAPL", p=.8, session="2026-10-09", **kw):

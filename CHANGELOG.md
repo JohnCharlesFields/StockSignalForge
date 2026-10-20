@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+## [2026-10-20] StockSignalForge Branding and Historical Evidence Integrity
+
+### Changed
+- Restored **StockSignalForge** as the project name and **easymoneysniper** as its frontend slogan, retaining the requested AI research workbench description. Retained HKUDS/Vibe-Trading attribution, MIT licensing, provider integration docs and factual data-source labels; no database/package identifier migration.
+- Historical probabilities without complete validation provenance are shown as unverified research references across fresh and cached board views. Numeric probabilities, rank weights and stored historical predictions are not rewritten.
+
+### Fixed
+- Known dated splits convert shares, price/risk units and event-exit accounting forward from their effective session instead of creating fictitious returns. Unverified unit jumps and fractional reverse-split cash adjustments remain unknown, not gains/losses.
+- CI collection uses package-relative shared-test imports, not a local runner's incidental path. Synthetic peer-history fixtures are created in temporary files; the earnings-window eligibility fixture uses fixed business-session dates. MCP transport tests use the SDK's ErrorData factory when available, retaining compatibility with the earlier constructor. Assertions and production strategy thresholds are retained.
+- Membership archives use timezone-aware actual acquisition and immutable same-day versions. Retrospective reconstruction is not certified as contemporaneous membership; missing evidence cannot fall back to today's constituents. PIT builders retain individual effective-date changes and reject uncertified activation before paid I/O.
+- Event revisions retain complete historical metadata, including affected symbols, rather than assigning a current correction to an old known-at timestamp. Legacy partial records do not fabricate historical coverage.
+- Opportunity rosters are admitted from prospective inputs before future outcome availability is checked. Resolved comparisons remain explicitly conditional; completed-trade archives cannot masquerade as a complete prospective portfolio plan stream.
+- Calibration labels handle known split units, unchanged raw-price costs, mature valid-session baselines and exit-open-only information. Explicit independent closed SQLite snapshots are supported; live WAL databases cannot use the immutable shortcut.
+- Chart cache identity includes the revised entry/evidence versions; the prior chart range persistence and missing-value fixes remain intact.
+
+### Evidence and Limitations
+- Recomputed the fixed historical study on 1,143 cached files: 10,443 declared seeds and 9,482 resolved common comparisons. All six 2026 mean-net-return intervals cross zero; no historical winner is activated. Summarized statistics, costs and limitations are in `wiki/RELEASE_20261020_ZH.md`; no private datasets are distributed.
+- Strict 5/8-session calibration rebuilding found zero time-verified eligible historical events, not a 0% market win rate. No model was fitted or activated; old numeric curves remain research-only references.
+- Corporate-action evidence is incomplete, historical event/universe coverage remains partial, shorts lack verified real borrowing, and previously inspected history is not an untouched test set. No claim of stable profit, zero leakage or absence of overfitting.
+- This source publication does not restart production Docker, train/activate a model, download paid data or place orders. Public-copy verification is recorded separately in `PUBLIC_RELEASE.md`.
+
 ## [2026-10-19] Causal Direction Research and Prospective Evidence Capture
 
 ### Added

@@ -993,7 +993,7 @@ export function SingleStockOvernight() {
             </div>
           </section>
 
-          <PriceChart symbol={data?.symbol ?? symbol} currentIv={data?.volatility?.iv?.atm_iv} priceLines={chartPriceLines} dataDate={data?.day_change?.as_of ?? undefined} />
+          <div id="stock-chart"><PriceChart symbol={data?.symbol ?? symbol} currentIv={data?.volatility?.iv?.atm_iv} priceLines={chartPriceLines} dataDate={data?.day_change?.as_of ?? undefined} /></div>
 
           <DistributionRiskCard risk={data?.distribution_risk} />
 

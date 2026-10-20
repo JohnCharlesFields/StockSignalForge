@@ -26,6 +26,7 @@ from right_side_entry_research import (
 )
 from scripts.validate_event_exit import costed
 from scripts.validate_pullback_entry import PERIODS, summarize
+from research_opportunity_ledger import opportunity_record
 
 
 def eligible_period(frame, seed):
@@ -56,7 +57,7 @@ def run_symbol(args):
         if len(f)<100:
             return dict(symbol=path.stem,sha256=sha,error='insufficient_history')
         context=make_context(f)
-        rows,counts,quality=[],Counter(),{}
+        rows,counts,quality,ledger=[],Counter(),{},[]
         for side in ('LONG','SHORT'):
             seeds=confirmation_opportunities(path.stem,f,side)
             runs={policy:replay_right_side(path.stem,f,side,policy,schedule,seeds,context) for policy in POLICIES}
@@ -64,19 +65,33 @@ def run_symbol(args):
             transactions={p:{t['id']:costed(t,side) for t in r['transactions']} for p,r in runs.items()}
             entries={p:{m['opportunity_id'] for m in r['markers'] if m['stage']=='ENTRY'} for p,r in runs.items()}
             for seed in seeds:
+                # Record every declared seed before future maturity filtering.
+                setup = pd.Timestamp(seed['setup_date']).date()
+                decision = pd.Timestamp(seed['date']).date()
+                setup_days = [shift_session(setup,n) for n in range(4)]
+                observed = {d.date() for d in f.index if d.date() <= decision}
+                admitted = decision in setup_days[1:] and all(d in observed for d in setup_days if d <= decision)
+                record = opportunity_record(path.stem, side, seed,
+                    'admitted' if admitted else 'input_unknown', 'pending')
+                ledger.append(record)
                 period,end=eligible_period(f,seed)
                 if period is None:
+                    record['outcome_status'] = end
                     counts[side+'_'+end]+=1
                     continue
                 if any(r['latest'].get('date','')<end for r in runs.values()):
+                    record['outcome_status'] = 'path_unknown'
                     counts[side+'_path_unknown']+=1
                     continue
                 if any(seed['id'] in entries[p] and seed['id'] not in transactions[p] for p in POLICIES):
+                    record['outcome_status'] = 'unresolved_entry'
                     counts[side+'_unresolved_entry']+=1
                     continue
+                record['outcome_status'] = 'resolved_comparison'
                 rows.append(dict(id=seed['id'],symbol=path.stem,side=side,date=seed['date'],period=period,
                     variants={p:transactions[p].get(seed['id']) for p in POLICIES}))
-        return dict(symbol=path.stem,sha256=sha,opportunities=rows,exclusions=dict(counts),quality=quality)
+        return dict(symbol=path.stem,sha256=sha,opportunities=rows,opportunity_ledger=ledger,
+                    exclusions=dict(counts),quality=quality)
     except Exception as exc:
         return dict(symbol=path.stem,sha256=sha,error=type(exc).__name__,error_detail=str(exc)[:200])
 
@@ -151,11 +166,15 @@ def main():
             if n%100==0:
                 print(json.dumps(dict(done=n,total=len(files),seconds=round(time.monotonic()-started,1))),flush=True)
     rows=[r for result in results for r in result.get('opportunities',[])]
+    ledger=[r for result in results for r in result.get('opportunity_ledger',[])]
     matched_dates=sorted({t['exit_date'] for r in rows for t in r['variants'].values() if t and t['exit_reason']=='event_previous_close'})
     unsupported=[d for d in matched_dates if d<'2026-01-01' and (d[5:] in {'07-03','12-24'} or (d[5:7]=='11' and pd.Timestamp(d).dayofweek==4))]
     if unsupported:
         raise ValueError('Verify historical early close deadline: '+','.join(unsupported))
     report=dict(version=VERSION,as_of='2026-10-15',fitted=False,parameter_search=False,eligible_for_activation=False,
+        opportunity_ledger=ledger, opportunity_ledger_count=len(ledger),
+        comparison_metrics_conditional_on_resolved_outcomes=True,
+        full_independent_raw_signal_universe=False,
         paid_requests=0,external_requests=0,production_writes=0,entry='next_open_after_complete_signal',
         event_day_entry='defer_until_event_day_complete_then_next_open_if_reconfirmed',
         same_close='historical_quote_reference_only',maturity_sessions=MATURITY_SESSIONS,
@@ -171,9 +190,11 @@ def main():
             announcements_sha256=hashlib.sha256(ap.read_bytes()).hexdigest(),
             prices=[dict(symbol=r['symbol'],sha256=r['sha256']) for r in results]),
         code_manifest={str(path.relative_to(AGENT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [
-            Path(__file__),AGENT/'right_side_entry_research.py',AGENT/'event_exit_research.py',
+            Path(__file__),AGENT/'right_side_entry_research.py',AGENT/'event_exit_research.py',AGENT/'trading_calendar_history.py',
             AGENT/'pullback_entry_research.py',AGENT/'rebound_short_research.py',AGENT/'cost_model.py',
-            AGENT/'pullback_validation.py',AGENT/'market_calendar.py',AGENT/'scripts/validate_event_exit.py']},
+            AGENT/'pullback_validation.py',AGENT/'market_calendar.py',AGENT/'scripts/validate_event_exit.py',
+            AGENT/'corporate_action_research.py',AGENT/'config/corporate_actions_verified.json',
+            AGENT/'research_opportunity_ledger.py']},
         quality={side:{policy:dict(Counter(r['quality'][side][policy]['status'] for r in results if 'quality' in r))
                        for policy in POLICIES} for side in ('LONG','SHORT')},
         skips={side:{policy:dict(sum((Counter(r['quality'][side][policy]['skips']) for r in results if 'quality' in r),Counter()))

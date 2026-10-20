@@ -19,7 +19,7 @@ import warnings
 import html
 import sys
 from functools import lru_cache
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Optional
@@ -39,6 +39,7 @@ from scipy.stats import norm
 
 from fincept_adapters import cboe_chain_to_frames, get_cboe_option_chain
 from market_data_service import get_daily_history
+from universe_history import available_snapshot, observation_time
 from gex_quality import finite_number, normalize_gex, unavailable_gex
 import cost_model
 
@@ -615,16 +616,24 @@ def archive_universe_snapshot(
     snapshot_date = effective_date or date.today().isoformat()
     target_dir = universe_snapshot_root() / key
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"{snapshot_date}.json"
+    captured = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     payload = {
         "universe": key,
         "effective_date": snapshot_date,
-        "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "captured_at": captured,
         "source": source,
         "ticker_count": len(tickers),
         "tickers": sorted(set(tickers)),
     }
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    raw = json.dumps(payload, ensure_ascii=False, indent=2)
+    suffix = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    target = target_dir / f"{snapshot_date}__{suffix}.json"
+    try:
+        with target.open('x', encoding='utf-8') as stream:
+            stream.write(raw)
+    except FileExistsError:
+        if target.read_text(encoding='utf-8') != raw:
+            raise ValueError('immutable snapshot conflict')
     return target
 
 
@@ -634,11 +643,14 @@ def load_universe_snapshot(key: str, as_of: str) -> tuple[list[str], str] | None
     target_dir = universe_snapshot_root() / key
     if not target_dir.exists():
         return None
-    candidates = sorted(path for path in target_dir.glob("*.json") if path.stem <= as_of)
+    candidates = []
+    for path in target_dir.glob('*.json'):
+        payload = json.loads(path.read_text(encoding='utf-8'))
+        if available_snapshot(payload, as_of):
+            candidates.append((payload['effective_date'], observation_time(payload['captured_at']), path, payload))
     if not candidates:
         return None
-    selected = candidates[-1]
-    payload = json.loads(selected.read_text(encoding="utf-8"))
+    _, _, selected, payload = sorted(candidates, key=lambda row: row[:2])[-1]
     tickers = [
         normalize_yfinance_symbol(str(x)) for x in payload.get("tickers", [])
         if str(x).strip() and is_equity_holding_ticker(str(x))
@@ -659,8 +671,7 @@ def resolve_snapshot_aware_universe(
         if archived:
             tickers, source = archived
             return tickers, source, universe_memberships(tickers, label)
-        if archive_only:
-            raise ValueError(f"no archived snapshot for universe '{key}' on or before {as_of}")
+        raise ValueError(f"no time-verified archived snapshot for universe '{key}' on or before {as_of}")
     tickers, source = loader()
     snapshot_path = archive_universe_snapshot(key, tickers, source)
     return tickers, f"{source};snapshot:{snapshot_path}", universe_memberships(tickers, label)

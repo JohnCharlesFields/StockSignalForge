@@ -27,7 +27,7 @@ VIEWS = ('fomc_only', 'earnings_only', 'combined')
 
 
 def costed(trade, side):
-    gross = (trade['exit_price']/trade['entry_price']-1)*(1 if side == 'LONG' else -1)
+    gross = (trade['exit_price']*trade.get('share_multiplier', 1.)/trade['entry_price']-1)*(1 if side == 'LONG' else -1)
     cost = cost_model.equity_round_trip_cost(trade['entry_price'], trade['adv'])
     days = (pd.Timestamp(trade['exit_date'])-pd.Timestamp(trade['entry_date'])).days
     return {**trade, 'net_return':gross-cost, 'cost':cost, 'side':side,
@@ -145,8 +145,9 @@ def main():
             announcements_sha256=hashlib.sha256(announcement_path.read_bytes()).hexdigest(),
             prices=[dict(symbol=result['symbol'],sha256=result['sha256']) for result in results]),
         code_manifest={str(path.relative_to(AGENT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [
-            Path(__file__), AGENT/'event_exit_research.py', AGENT/'pullback_entry_research.py', AGENT/'rebound_short_research.py',
-            AGENT/'market_calendar.py', AGENT/'pullback_validation.py', AGENT/'cost_model.py']},
+            Path(__file__), AGENT/'event_exit_research.py', AGENT/'trading_calendar_history.py', AGENT/'pullback_entry_research.py', AGENT/'rebound_short_research.py',
+            AGENT/'market_calendar.py', AGENT/'pullback_validation.py', AGENT/'cost_model.py',
+            AGENT/'corporate_action_research.py', AGENT/'config/corporate_actions_verified.json']},
         limitations=['known-event subset only, not complete historical earnings/CPI/PCE/NFP/GDP coverage',
             'missing calendar records are unknown, not event-free', 'official tentative FOMC announcements, not emergency-meeting prediction',
             'source HTML retrospectively read; dated announcement metadata, not an immutable captured web archive',

@@ -1,0 +1,18 @@
+{
+  "version": "official_reconstruction_20261019",
+  "historical_coverage_complete": false,
+  "actions": [
+    {
+      "symbol": "ANET",
+      "kind": "split",
+      "ratio": 4,
+      "effective_date": "2024-12-04",
+      "known_at": "2024-11-08T05:00:00+00:00",
+      "knowledge_precision": "conservative_end_of_announced_ET_date",
+      "announcement_date": "2024-11-07",
+      "evidence_kind": "dated_official_reconstruction",
+      "retrieved_on": "2026-10-19",
+      "source_url": "https://www.sec.gov/Archives/edgar/data/1596532/000159653224000366/anet-20241107.htm"
+    }
+  ]
+}

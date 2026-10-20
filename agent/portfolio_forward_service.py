@@ -52,7 +52,8 @@ def _manifest():
              'priority_board_service.py', 'app_database.py', 'pullback_entry_research.py',
              'rebound_short_research.py', 'technical_signal_metrics.py', 'market_calendar.py',
              'pullback_validation.py', 'cost_model.py', 'trade_risk_rules.py',
-             'portfolio_signal_evidence.py', 'market_data_service.py', 'entry_path_research.py')
+             'portfolio_signal_evidence.py', 'market_data_service.py', 'entry_path_research.py',
+             'corporate_action_research.py', 'config/corporate_actions_verified.json')
     return {name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in files}
 
 

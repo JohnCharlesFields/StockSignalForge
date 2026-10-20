@@ -212,7 +212,7 @@ def _board_from_latest_slices(limit: int = 8) -> Optional[Dict[str, Any]]:
     _attach_sector_diffusion_labels(picks)
     top_win = max((_finite(p.get("calibrated_probability"), 0.5) for p in picks), default=0.0)
     data_as_of = str(rows[0].get("as_of_date") or "")
-    return {
+    return _research_validation_view({
         "generated_at": rows[0].get("created_at") or data_as_of,
         **_board_freshness(data_as_of),
         "snapshot_id": None,
@@ -230,7 +230,7 @@ def _board_from_latest_slices(limit: int = 8) -> Optional[Dict[str, Any]]:
         "cache_hit": False,
         "source": "priority_candidate_slices",
         "method_note": "Fast read-only fallback: latest persisted daily slice; no market data or external API recomputation.",
-    }
+    })
 
 
 def _window_return(closes: Optional[List[Any]], window: int = 20) -> Optional[float]:
@@ -841,8 +841,8 @@ def _calibration_provenance(horizon: int = PULLBACK_HV_HORIZON) -> Dict[str, Any
         "available": True,
         "source": row.get("source"),
         "source_label": (
-            "Databento/PIT 校准" if str(row.get("source") or "").startswith("databento")
-            else "历史回放校准"
+            "Databento 历史研究" if str(row.get("source") or "").startswith("databento")
+            else "历史回放研究"
         ),
         "generated_at": row.get("generated_at"),
         "event_count": row.get("event_count"),
@@ -852,10 +852,49 @@ def _calibration_provenance(horizon: int = PULLBACK_HV_HORIZON) -> Dict[str, Any
         "in_sample": prov.get("in_sample"),
         "note": prov.get("note"),
         "provenance_complete": bool(prov.get("price_source") and prov.get("window")),
+        "validation_verified": all(prov.get(k) is True for k in _VALIDATION_FIELDS),
     }
 
 
+_VALIDATION_FIELDS = ('point_in_time_universe', 'survivorship_controlled',
+                      'corporate_actions_verified', 'unseen_holdout', 'account_backtest_verified')
+
+
+def _curve_validation(signal_type, horizon):
+    try:
+        row = signal_calibration_active(signal_type, horizon)
+        prov = ((row or {}).get('curve', {}).get('global') or {}).get('provenance') or {}
+    except Exception:
+        prov = {}
+    return all(prov.get(key) is True for key in _VALIDATION_FIELDS)
+
+
+def _research_validation_view(value):
+    """Read-time trust overlay; never rewrite cached ranks, probabilities or history."""
+    signal = value.get('signal_basis') or 'pullback_hv'
+    if signal == 'pullback_hv_slice':
+        signal = 'pullback_hv'
+    horizon = int(value.get('horizon_days') or PULLBACK_HV_HORIZON)
+    if _curve_validation(signal, horizon):
+        return value
+    note = f'历史曲线未验证（{horizon}个交易日）；成分/公司行动或独立验证证据不足，旧数值仅作研究参考，未替换新曲线。'
+    return {**value, 'confidence': {**(value.get('confidence') or {}), 'badge':'experimental',
+                'validation_status':'unverified', 'note':note},
+            'picks': [{**p, 'confidence_badge':'experimental'} for p in (value.get('picks') or [])],
+            'win_rate_explainer':WIN_RATE_EXPLAINER+' '+note,
+            'method_note':str(value.get('method_note') or '').replace('已验证的校准胜率','旧曲线研究概率')}
+
+
 def _select_signals() -> Dict[str, Any]:
+    selected = _select_signal_candidates()
+    signal = 'pullback_hv' if selected.get('mode') == 'pullback_hv' else selected.get('launch','launch')
+    if not _curve_validation(signal, selected['horizon']):
+        selected = {**selected, 'badge':'experimental', 'validation_status':'unverified',
+                    'note':f'历史曲线未验证（{selected["horizon"]}个交易日）；旧概率仅作研究参考，等待合格重算。'}
+    return selected
+
+
+def _select_signal_candidates() -> Dict[str, Any]:
     """Pick the best-available calibrated signal + horizon and an honest badge.
 
     Preference order: the combined "pullback + vol-expansion" at 10d (strongest
@@ -865,7 +904,7 @@ def _select_signals() -> Dict[str, Any]:
     combo = _active_edge("pullback_hv", PULLBACK_HV_HORIZON)
     if combo and combo.get("validated"):
         return {"mode": "pullback_hv", "horizon": PULLBACK_HV_HORIZON, "badge": "validated",
-                "note": "回调+波动扩张(10日)：顶桶净超额显著，CI 排除 0", "edge": combo}
+                "note": f"回调+波动扩张({PULLBACK_HV_HORIZON}日)：顶桶净超额显著，CI 排除 0", "edge": combo}
 
     launch_c, launch_b = _active_edge("launch_contrarian"), _active_edge("launch")
     if launch_c and launch_c.get("validated"):
@@ -1125,13 +1164,13 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
             from v_swing_service import attach_board
             view = attach_board({**cached, **freshness, "cache_hit": True})
             picks = [{**p, "options_sentiment": _options_sentiment(p)} for p in (view.get("picks") or [])[:limit]]
-            return {**view, "picks": picks}
+            return _research_validation_view({**view, "picks": picks})
         if os.getenv("PRIORITY_BOARD_RECOMPUTE_ON_MISS", "0").lower() in {"0", "false", "no"}:
             slice_board = _board_from_latest_slices(MAX_CACHED_PICKS)
             if slice_board is not None:
                 from v_swing_service import attach_board
                 view = attach_board(slice_board)
-                return {**view, "picks": view["picks"][:limit]}
+                return _research_validation_view({**view, "picks": view["picks"][:limit]})
 
     snapshot = latest_home_dashboard_snapshot() or {}
     rows = (((snapshot.get("payload") or {}).get("rows")) or [])
@@ -1370,4 +1409,4 @@ def compute_priority_board(limit: int = 8, force_refresh: bool = False) -> Dict[
     cache_set(CACHE_KEY, result, ttl_seconds=CACHE_TTL_SECONDS)
     from v_swing_service import attach_board
     view = attach_board(result)
-    return {**view, "picks": view["picks"][:limit]}
+    return _research_validation_view({**view, "picks": view["picks"][:limit]})

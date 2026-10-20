@@ -56,7 +56,8 @@ def test_historical_time_split_cannot_claim_unknown_provenance_passed():
 
 
 def test_membership_does_not_borrow_future_archive():
-    archives = [{'date': date(2024, 4, 1), 'members': {'A'}}, {'date': date(2024, 7, 1), 'members': {'B'}}]
+    archives = [{'date': date(2024, 4, 1), 'members': {'A'}, 'captured_at':'2024-04-01T12:00:00Z'},
+                {'date': date(2024, 7, 1), 'members': {'B'}, 'captured_at':'2024-07-01T12:00:00Z'}]
     assert not study.member_at(archives, 'A', date(2024, 3, 29))
     assert study.member_at(archives, 'A', date(2024, 6, 3))
     assert not study.member_at(archives, 'B', date(2024, 6, 3))

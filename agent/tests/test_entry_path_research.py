@@ -9,7 +9,7 @@ from entry_path_research import complete_window, complete_forward_window, entry_
 from pullback_validation import shift_session
 from right_side_entry_research import replay_right_side
 from scripts.validate_event_exit import costed
-from test_right_side_entry_research import fixture, schedule_for
+from .test_right_side_entry_research import fixture, schedule_for
 
 
 def replay(f, c, s, side='LONG', experiment='baseline', market=None):

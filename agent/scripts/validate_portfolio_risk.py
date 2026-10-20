@@ -17,10 +17,11 @@ AGENT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENT))
 import cost_model
 from event_exit_research import compile_calendar
-from market_calendar import is_trading_day
+from market_calendar import is_trading_day, previous_trading_day
 from portfolio_risk_research import VERSION, PortfolioConfig, entry_plans, exit_at, replay_portfolio
 from pullback_entry_research import _bars
 from pullback_validation import shift_session
+from corporate_action_research import action_records, split_ratio, suspicious_ratio, ActionDataUnknown
 
 COHORT_SHA = '14fcf2bf9077e1ec4be3bd0a5bf4bab6ca8f4cb78806ec2d3fa159ef2ab17e55'
 AUDIT_SHA = '872955a3f3cd53366657355365df3b1daddb57a575684f35a31193fae544a87a'
@@ -33,7 +34,44 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def archive_unit_issues(data, rows, corporate_actions=None):
+    """Audit, never repair archived fills by silently changing their outcomes."""
+    actions = action_records(corporate_actions)
+    alerts = {}
+    for symbol, frame in data.items():
+        found, previous = [], None
+        for stamp, bar in frame.iterrows():
+            day = str(stamp.date())
+            try:
+                factor = split_ratio(symbol, day, actions)
+                if factor != 1:
+                    found.append((day, 'split_accounting_requires_regeneration'))
+                if previous is not None and (suspicious_ratio(float(bar.Open), previous, factor)
+                                             or suspicious_ratio(float(bar.Close), previous, factor)):
+                    found.append((day, 'unverified_price_units'))
+            except ActionDataUnknown:
+                found.append((day, 'unverified_action'))
+            previous = float(bar.Close)
+        alerts[symbol] = found
+    issues = []
+    for row in rows:
+        trade = row['variants']['baseline']
+        if not trade:
+            continue
+        frame = data[row['symbol']]
+        prefix = frame.loc[frame.index <= pd.Timestamp(trade['decision_date'])].tail(101)
+        start = str(prefix.index[0].date()) if len(prefix) else trade['decision_date']
+        matches = [(day, reason) for day, reason in alerts[row['symbol']]
+                   if start <= day <= trade['exit_date']]
+        if matches:
+            issues.append(dict(id=trade['id'], symbol=row['symbol'],
+                               reasons=[dict(date=d, reason=r) for d, r in matches]))
+    return issues
+
+
 def verify_single_paths(data, rows, schedule):
+    if archive_unit_issues(data, rows):
+        raise ValueError('archived_paths_require_action_aware_regeneration')
     events = defaultdict(list)
     for e in schedule.exits:
         events[e['exit_date']].append(e)
@@ -80,6 +118,8 @@ def paired_intervals(values, block):
 
 
 def daily_returns(run, initial_cash):
+    if run.get('status') == 'data_unknown' or run.get('metrics') is None:
+        raise ValueError('unknown_account_is_not_a_return_series')
     equity = np.array([s['equity'] for s in run['snapshots']], dtype=float)
     return equity/np.r_[initial_cash, equity[:-1]]-1
 
@@ -89,6 +129,8 @@ def main():
     for name in ('previous', 'calendar', 'announcements', 'protocol', 'output'):
         p.add_argument('--'+name, required=True)
     p.add_argument('--symbols', default='')
+    p.add_argument('--allow-completed-archive-diagnostic', action='store_true',
+                   help='Diagnostic only: completed historical entries are not a prospective universe')
     a = p.parse_args()
     old, output = Path(a.previous), Path(a.output)
     audit_raw = (old/'results-calendar-audited.json').read_bytes()
@@ -105,7 +147,8 @@ def main():
     code_paths = [Path(__file__), AGENT/'portfolio_risk_research.py', AGENT/'backtest/engines/base.py',
         AGENT/'backtest/engines/global_equity.py', AGENT/'backtest/models.py', AGENT/'backtest/metrics.py',
         AGENT/'trade_risk_rules.py', AGENT/'cost_model.py', AGENT/'market_calendar.py',
-        AGENT/'event_exit_research.py', AGENT/'pullback_validation.py', AGENT/'pullback_entry_research.py']
+        AGENT/'event_exit_research.py', AGENT/'trading_calendar_history.py', AGENT/'pullback_validation.py', AGENT/'pullback_entry_research.py',
+        AGENT/'corporate_action_research.py', AGENT/'config/corporate_actions_verified.json']
     code = {str(f.relative_to(AGENT)): sha(f.read_bytes()) for f in code_paths}
     protocol_hash = sha(Path(a.protocol).read_bytes())
     if a.symbols:
@@ -118,6 +161,18 @@ def main():
         f.index = pd.DatetimeIndex([pd.Timestamp(d.date()) for d in f.index])
         data[s] = f
     started = time.monotonic()
+    issues = archive_unit_issues(data, rows)
+    if issues or not a.allow_completed_archive_diagnostic:
+        report = dict(version=VERSION, status='blocked_archive_integrity', metrics=None,
+            rejection_reasons=(['archived_price_units_require_regeneration'] if issues else [])+
+                ([] if a.allow_completed_archive_diagnostic else ['completed_archive_requires_explicit_diagnostic_opt_in']),
+            affected_archived_plans=issues, rows=len(rows), code_manifest=code,
+            input_manifest=dict(cohort_sha256=COHORT_SHA, audit_sha256=AUDIT_SHA, prices=files),
+            eligible_for_activation=False, external_requests=0, paid_requests=0, production_writes=0,
+            note='Keep the original archive. Regenerate causal plans and split-aware paths; do not delete affected losses or replace unknowns with cash zero.')
+        output.write_text(json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2), encoding='utf-8')
+        print(json.dumps(dict(stage=report['status'], affected_plans=len(issues), metrics=None)), flush=True)
+        return
     checks = verify_single_paths(data, rows, schedule)
     print(json.dumps(dict(stage='individual_baseline_reproduced', trades=checks)), flush=True)
     config = PortfolioConfig()
@@ -129,9 +184,9 @@ def main():
         end = dict(development='2024-12-31', validation='2025-12-31', test='2026-10-15')[period]
         start = min(r['date'] for r in cohort)
         days = [str(d.date()) for d in pd.bdate_range(start, end) if is_trading_day(d.date())]
-        plans = entry_plans(cohort)
+        plans = entry_plans(cohort, allow_completed_archive=True)
         assert all(p['side'] != 'SHORT' or p['symbol'] not in {'AAPL', 'MSFT', 'AMZN', 'GOOG', 'GOOGL', 'META', 'NVDA', 'TSLA'} for p in plans)
-        spy = data['SPY'].Close.reindex(pd.to_datetime([shift_session(pd.Timestamp(days[0]).date(), -1).isoformat()]+days))
+        spy = data['SPY'].Close.reindex(pd.to_datetime([previous_trading_day(pd.Timestamp(days[0]).date()).isoformat()]+days))
         if spy.isna().any() or not np.isfinite(spy).all() or (spy <= 0).any():
             raise ValueError('missing_spy_benchmark_prices')
         bench = spy.pct_change(fill_method=None).iloc[1:]
@@ -143,7 +198,10 @@ def main():
                                        config=config, benchmark_returns=bench)
                 result[period][mode][sizing] = run
                 print(json.dumps(dict(stage='portfolio', period=period, mode=mode, sizing=sizing,
-                    trades=len(run['trades']), total_return=run['metrics']['total_return'])), flush=True)
+                    status=run['status'], trades=len(run['trades']),
+                    total_return=run['metrics']['total_return'] if run['metrics'] else None)), flush=True)
+                if run['metrics'] is None:
+                    raise ValueError('unknown_account_cannot_enter_portfolio_comparison:'+run['unknown_reason'])
         if period == 'test':
             for label, rate, reverse in (('borrow0', 0., False), ('borrow20', .20, False), ('reverse_queue', .05, True)):
                 sensitivity[label] = {}
@@ -152,6 +210,8 @@ def main():
                     for sizing in SIZINGS:
                         run = replay_portfolio(data, plans, days, schedule, mode=mode, sizing=sizing,
                             config=replace(config, borrow_rate=rate), reverse_priority=reverse, benchmark_returns=bench)
+                        if run['metrics'] is None:
+                            raise ValueError('unknown_account_cannot_enter_sensitivity:'+run['unknown_reason'])
                         sensitivity[label][mode][sizing] = {k: run[k] for k in ('metrics', 'fees', 'borrow', 'rejects')}
     inference = {}
     for mode in MODES:

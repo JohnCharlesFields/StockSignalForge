@@ -75,9 +75,9 @@ def test_retest_timeout_and_structure_failure():
 
 def schedule_for(f, day_index, symbol='AAA', category='earnings'):
     event=dict(event_id='e', category=category, title='CPI' if category=='macro' else 'earnings',
-               date=str(f.index[day_index].date()), first_seen_at='2026-01-01T00:00:00Z',
+               date=str(f.index[day_index].date()), first_seen_at='2026-01-01T00:00:00Z', updated_at='2026-01-01T00:00:00Z',
                status='scheduled', confidence='official', symbols=[dict(symbol=symbol,relation_type='subject')])
-    return compile_calendar(dict(events=[event],changes=[]),{})
+    return compile_calendar(dict(events=[event],changes=[], exported_at='2026-01-01T00:00:00Z'),{})
 
 
 @pytest.mark.parametrize('side', ['LONG','SHORT'])

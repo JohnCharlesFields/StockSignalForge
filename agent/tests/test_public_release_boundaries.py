@@ -1,5 +1,6 @@
 """Public-copy defaults must not assume private data or migrate the old DB."""
 import json
+import ast
 from pathlib import Path
 
 import yaml
@@ -50,6 +51,24 @@ def test_readme_screenshot_links_exist():
 
 
 def test_public_readmes_use_the_requested_title():
-    title = "# 金融机构开发者 × 聚源数据地图 MCP：开源 AI 量化与投研系统。"
+    title = "# StockSignalForge"
     for name in ("README.md", "README_zh.md"):
-        assert (ROOT / name).read_text(encoding="utf-8").splitlines()[0] == title
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert text.splitlines()[0] == title
+        assert "HKUDS/Vibe-Trading" in text
+        assert "GILDATA_MCP.md" in text
+
+
+def test_page_brand_is_provider_independent():
+    html = (ROOT / "frontend/index.html").read_text(encoding="utf-8")
+    layout = (ROOT / "frontend/src/components/layout/Layout.tsx").read_text(encoding="utf-8")
+    assert "<title>StockSignalForge · easymoneysniper</title>" in html
+    assert "easymoneysniper" in layout
+    assert "聚源数据地图 MCP" not in html + layout
+
+
+def test_shared_test_fixtures_use_package_imports():
+    for path in (ROOT / 'agent/tests').glob('test_*.py'):
+        for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+            if isinstance(node, ast.ImportFrom) and (node.module or '').startswith('test_'):
+                assert node.level > 0, f'{path.name}:{node.lineno} must use a package-relative fixture import'

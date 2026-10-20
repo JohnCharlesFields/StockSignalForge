@@ -9,8 +9,10 @@ import math
 import pandas as pd
 
 from market_calendar import previous_trading_day, session_close_et
+from trading_calendar_history import SNAPSHOT_KEY, is_full_snapshot, semantic_payload
+from corporate_action_research import shares_between
 
-VERSION = 'event_exit_matched_entries_v1'
+VERSION = 'event_exit_complete_versions_v2'
 
 
 def _instant(value):
@@ -26,7 +28,7 @@ def _kind(item):
         return 'EARNINGS'
     if item.get('category') != 'macro' or item.get('confidence') != 'official':
         return None
-    text = (str(item.get('title', ''))+' '+str(item.get('detail', {}).get('summary', ''))).lower()
+    text = (str(item.get('title', ''))+' '+str((item.get('detail') or {}).get('summary', ''))).lower()
     if 'fomc' in text and not any(s in text for s in ['minutes', '纪要']):
         return 'FOMC'
     if 'cpi' in text or 'consumer price index' in text or '消费者价格' in text:
@@ -54,25 +56,66 @@ def compile_calendar(export, announcements):
         changes[change['event_id']].append(change)
     for item in export.get('events', []):
         kind = _kind(item)
-        if item.get('category') not in {'macro', 'earnings'}:
-            audit['out_of_scope_events'] += 1
-            continue
         audit['source_'+(kind or 'unrecognized_macro')] += 1
         first = _instant(item.get('first_seen_at'))
         if first is None:
             audit['unknown_first_seen'] += 1
             continue
-        history = sorted(changes[item['event_id']], key=lambda c: c['changed_at'])
-        initial = {**item, **(history[0]['before'] if history else {})}
-        versions[item['event_id']].append((first, initial))
-        state = initial
-        for change in history:
-            known = _instant(change['changed_at'])
+        ident = item['event_id']
+        full = []
+        history_states = []
+        partial_times = []
+        invalid_time = False
+        for change in changes[ident]:
+            known = _instant(change.get('changed_at'))
             if known is None or known < first:
                 audit['invalid_revision_time'] += 1
+                invalid_time = True
                 continue
-            state = {**state, **change['after']}
-            versions[item['event_id']].append((known, state))
+            state = change.get('after')
+            if is_full_snapshot(state) and state.get('event_id') == ident:
+                value = (known, {k: v for k, v in state.items() if k != SNAPSHOT_KEY})
+                full.append(value)
+                history_states.append(value)
+            else:
+                partial_times.append(known)
+                history_states.append((known, dict(event_id=ident, category='unknown', status='unknown')))
+                audit['legacy_partial_revisions'] += 1
+        full.sort(key=lambda pair: pair[0])
+        if invalid_time:
+            audit['unusable_revision_history'] += 1
+            continue
+        # An incomplete revision is an unknown interval, not permission to keep
+        # using the previous complete state until a later complete anchor.
+        versions[ident].extend(history_states)
+        if full:
+            audit['complete_version_events'] += 1
+            audit['complete_versions'] += len(full)
+            # No reconstruction before the first complete snapshot, including
+            # legacy records first anchored long after their original discovery.
+            if full[0][0] > first:
+                audit['unknown_prior_version'] += 1
+            if (semantic_payload(full[-1][1]) == semantic_payload(item)
+                    and not any(t >= full[-1][0] for t in partial_times)):
+                continue
+            audit['unarchived_current_payload'] += 1
+        # Legacy updated_at did not reliably track removed metadata fields.
+        # Only the actual complete export proves this payload was observed.
+        observed = _instant(export.get('exported_at'))
+        updated = _instant(item.get('updated_at'))
+        fetched = _instant(item.get('fetched_at')) if item.get('fetched_at') else updated
+        if observed is None or updated is None or fetched is None:
+            audit['unknown_current_version_time'] += 1
+            if full:
+                versions[ident].append((full[-1][0], dict(event_id=ident, category='unknown', status='unknown')))
+            continue
+        known = max(observed, first, updated, fetched, *partial_times)
+        if full:
+            known = max(known, full[-1][0])
+        versions[ident].append((known, dict(item)))
+        audit['legacy_current_only'] += 1
+        if known > first:
+            audit['unknown_prior_version'] += 1
     for source in announcements.get('announcements', []):
         known = _instant(source.get('known_at'))
         if known is None:
@@ -149,9 +192,10 @@ def apply_event_exit(trade, frame, schedule, side, view='combined'):
     if not math.isfinite(close) or close <= 0:
         raise ValueError('missing_event_exit_close')
     held = int(((frame.index >= pd.Timestamp(trade['entry_date'])) & (frame.index <= pd.Timestamp(day))).sum()-1)
-    gross = (close/trade['entry_price']-1)*(1 if side == 'LONG' else -1)
+    multiplier = shares_between(trade['symbol'], trade['entry_date'], day)
+    gross = (close*multiplier/trade['entry_price']-1)*(1 if side == 'LONG' else -1)
     gross_key = 'gross_return' if side == 'LONG' else 'gross_directional_return'
-    return {**trade, gross_key:gross, 'exit_date':day, 'exit_price':close, 'exit_reason':'event_previous_close', 'held_sessions':held,
+    return {**trade, gross_key:gross, 'share_multiplier':multiplier, 'exit_date':day, 'exit_price':close, 'exit_reason':'event_previous_close', 'held_sessions':held,
         'event_exit':True, 'event_ids':[event['event_id'] for event in matches],
         'event_types':sorted({event['kind'] for event in matches}), 'event_dates':sorted({event['event_date'] for event in matches}),
         'event_known_at':[event['known_at'] for event in matches],

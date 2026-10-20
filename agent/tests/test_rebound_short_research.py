@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 import rebound_short_research as short
-from test_pullback_entry_research import bars
+from .test_pullback_entry_research import bars
 
 
 def controlled(monkeypatch, *, hold=3):
@@ -170,7 +170,8 @@ def test_chart_contains_separate_short_metadata_no_provider(monkeypatch):
     monkeypatch.setattr(market_data_service, '_massive_get', lambda *a, **k: (_ for _ in ()).throw(AssertionError('no provider')))
     response = api_server._single_candles('T', 'daily')
     assert response['short_entry_research']['contract']['version'] == short.VERSION
-    assert response['entry_research']['contract']['version'] == 'pullback_entry_research_v2'
+    from pullback_entry_research import VERSION
+    assert response['entry_research']['contract']['version'] == VERSION
     assert response['short_entry_research']['contract']['hold_sessions'] == 8
 
 
